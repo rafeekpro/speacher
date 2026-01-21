@@ -23,7 +23,7 @@ spec:
       containers:
         - name: backend
           image: speacher-backend:latest
-          imagePullPolicy: Always
+          imagePullPolicy: Never
           ports:
             - containerPort: 8000
           env:
