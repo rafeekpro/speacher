@@ -53,8 +53,8 @@ RUN addgroup -g 1001 -S nginx-custom && \
                                      /etc/nginx \
                                      /usr/share/nginx/html
 
-# Copy optimized nginx configuration
-COPY docker/nginx.prod.conf /etc/nginx/conf.d/default.conf
+# Copy optimized nginx configuration (full config, not just server block)
+COPY docker/nginx.prod.conf /etc/nginx/nginx.conf
 
 # Copy built files from builder stage
 COPY --from=builder --chown=nginx-user:nginx-custom /app/build /usr/share/nginx/html

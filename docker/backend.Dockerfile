@@ -12,6 +12,15 @@ RUN apt-get update && apt-get install -y \
     g++ \
     curl \
     libpq-dev \
+    pkg-config \
+    libavformat-dev \
+    libavcodec-dev \
+    libavdevice-dev \
+    libavutil-dev \
+    libswscale-dev \
+    libswresample-dev \
+    libavfilter-dev \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for fast Python package management
@@ -69,7 +78,7 @@ RUN uv pip install --system .
 
 # Copy only necessary application code
 COPY src/backend/ ./src/backend/
-COPY src/speecher/ ./src/speecher/
+COPY src/speacher/ ./src/speacher/
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && \
