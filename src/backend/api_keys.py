@@ -82,7 +82,7 @@ class APIKeysManager:
             # Encrypt sensitive values
             encrypted_keys = {}
             for key, value in keys.items():
-                if value and any(sensitive in key.lower() for sensitive in ["key", "secret", "token", "password"]):
+                if value and any(sensitive in key.lower() for sensitive in ["secret", "token", "password"]):
                     encrypted_keys[key] = self.encrypt_value(str(value))
                 else:
                     encrypted_keys[key] = value
@@ -115,13 +115,24 @@ class APIKeysManager:
             if not api_key:
                 return None
 
+            # Debug: Print raw key data
+            print(f"DEBUG: api_key.keys type = {type(api_key.keys)}, value = {api_key.keys}")
+
             # Decrypt sensitive values
             decrypted_keys = {}
-            for key, value in api_key.to_dict().get("keys", {}).items():
-                if value and any(sensitive in key.lower() for sensitive in ["key", "secret", "token", "password"]):
+            keys_dict = api_key.keys if isinstance(api_key.keys, dict) else {}
+            for key, value in keys_dict.items():
+                print(
+                    f"DEBUG: decrypting key = {key}, value type = {type(value)}, encrypted value = {value[:50] if isinstance(value, str) else 'not a string'}"
+                )
+                if value and any(sensitive in key.lower() for sensitive in ["secret", "token", "password"]):
                     try:
                         decrypted_keys[key] = self.decrypt_value(value)
-                    except Exception:
+                        print(
+                            f"DEBUG: decrypted {key} = {decrypted_keys[key][:20] if len(decrypted_keys[key]) > 20 else decrypted_keys[key]}"
+                        )
+                    except Exception as e:
+                        print(f"DEBUG: decryption failed for {key}: {e}")
                         decrypted_keys[key] = value
                 else:
                     decrypted_keys[key] = value
@@ -217,7 +228,7 @@ class APIKeysManager:
             for doc in session.query(APIKey).filter_by(enabled=True).all():
                 decrypted_keys = {}
                 for key, value in doc.to_dict().get("keys", {}).items():
-                    if value and any(sensitive in key.lower() for sensitive in ["key", "secret", "token", "password"]):
+                    if value and any(sensitive in key.lower() for sensitive in ["secret", "token", "password"]):
                         try:
                             decrypted_keys[key] = self.decrypt_value(value)
                         except Exception:
