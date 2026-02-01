@@ -16,8 +16,10 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.exc import SQLAlchemyError
 from enum import Enum
 
-# Database URL from environment
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://speacher_user:SpeacherPro4_2024!@10.0.0.5:30432/speacher")
+# Database URL from environment (required - no fallback for security)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL environment variable must be set")
 
 # SQLAlchemy setup
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=3600)
