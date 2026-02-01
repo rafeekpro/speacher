@@ -14,14 +14,11 @@ import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from bson import ObjectId
-
 # Load environment variables from .env file
 from dotenv import find_dotenv, load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from pymongo import MongoClient
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -44,6 +41,9 @@ from backend.api_v2 import auth_router, users_router, projects_router
 
 # Import API keys manager (now using PostgreSQL)
 from backend.api_keys import APIKeysManager
+
+# Import transcription database manager (PostgreSQL)
+from backend.transcriptions_db import transcription_manager
 
 # Configuration from environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://speacher_user:SpeacherPro4_2024!@10.0.0.5:30432/speacher")
@@ -234,32 +234,24 @@ async def transcribe(
         duration = result.get("duration", 0)
         cost_estimate = calculate_cost(provider, duration)
 
-        # Store in MongoDB
-        doc = {
-            "filename": file.filename,
-            "provider": provider,
-            "language": language,
-            "transcript": transcript_text,
-            "speakers": speakers,
-            "enable_diarization": enable_diarization,
-            "max_speakers": max_speakers,
-            "duration": duration,
-            "cost_estimate": cost_estimate,
-            "created_at": datetime.datetime.utcnow(),
-            "file_size": file.size,
-        }
+        # Store in PostgreSQL
+        doc_id = transcription_manager.save_transcription(
+            filename=file.filename,
+            provider=provider,
+            language=language,
+            transcript=transcript_text,
+            speakers=speakers,
+            enable_diarization=enable_diarization,
+            max_speakers=max_speakers,
+            duration=duration,
+            cost_estimate=cost_estimate,
+            file_size=file.size if hasattr(file, 'size') else len(file_content),
+            audio_file_id=None,  # Not tracking audio files separately for now
+            user_id=None,  # Anonymous user for now
+        )
 
-        # Try to save to MongoDB (optional, may not be configured)
-        doc_id = "local"
-        try:
-            result = collection.insert_one(doc)
-            doc_id = str(result.inserted_id)
-        except NameError:
-            # MongoDB collection not available - use local ID
-            doc_id = f"local-{uuid.uuid4()}"
-        except Exception as mongo_error:
-            # MongoDB connection failed - use local ID
-            logger.warning(f"MongoDB save failed: {mongo_error}")
+        if not doc_id:
+            logger.warning("Failed to save transcription to database, using local ID")
             doc_id = f"local-{uuid.uuid4()}"
 
         return TranscriptionResponse(
@@ -531,67 +523,40 @@ async def get_transcription_history(
     """
     Get transcription history with optional filtering.
     """
-    query = {}
-
-    if search:
-        query["filename"] = {"$regex": search, "$options": "i"}
-
+    # Convert date_from string to datetime if provided
+    date_from_dt = None
     if date_from:
-        query["created_at"] = {"$gte": datetime.datetime.fromisoformat(date_from)}
+        try:
+            date_from_dt = datetime.datetime.fromisoformat(date_from)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use ISO format: YYYY-MM-DD")
 
-    if provider:
-        query["provider"] = provider
-
-    # Fetch from MongoDB
-    try:
-        cursor = collection.find(query).sort("created_at", -1).limit(limit)
-
-        results = []
-        for doc in cursor:
-            doc["id"] = str(doc["_id"])
-            doc.pop("_id", None)
-            # Convert datetime to ISO format
-            if "created_at" in doc:
-                doc["created_at"] = doc["created_at"].isoformat()
-            results.append(doc)
-
-        return results
-    except Exception as e:
-        # Return empty list if MongoDB is not available
-        logger.warning(f"MongoDB error in history endpoint: {e}")
-        return []
+    # Fetch from PostgreSQL
+    return transcription_manager.get_transcription_history(
+        limit=limit,
+        search=search,
+        date_from=date_from_dt,
+        provider=provider,
+    )
 
 
 @app.get("/api/transcription/{transcription_id}")
 async def get_transcription(transcription_id: str) -> Dict[str, Any]:
     """Get a specific transcription by ID."""
-    try:
-        object_id = ObjectId(transcription_id)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Invalid transcription ID")
+    result = transcription_manager.get_transcription_by_id(transcription_id)
 
-    doc = collection.find_one({"_id": object_id})
-    if not doc:
+    if not result:
         raise HTTPException(status_code=404, detail="Transcription not found")
 
-    doc["id"] = str(doc["_id"])
-    doc.pop("_id", None)
-    if "created_at" in doc:
-        doc["created_at"] = doc["created_at"].isoformat()
-
-    return doc
+    return result
 
 
 @app.delete("/api/transcription/{transcription_id}")
 async def delete_transcription(transcription_id: str):
     """Delete a transcription by ID."""
-    try:
-        object_id = ObjectId(transcription_id)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Invalid transcription ID")
+    success = transcription_manager.delete_transcription(transcription_id)
 
-    result = collection.delete_one({"_id": object_id})
-    if result.deleted_count == 0:
+    if not success:
         raise HTTPException(status_code=404, detail="Transcription not found")
 
     return {"message": "Transcription deleted successfully"}
@@ -632,11 +597,16 @@ async def debug_aws_config():
 
 @app.get("/db/health")
 async def database_health():
-    """Check MongoDB connection."""
+    """Check PostgreSQL connection."""
     try:
-        # Ping MongoDB
-        mongo_client.admin.command("ping")
-        return {"status": "healthy", "database": "MongoDB connected"}
+        # Test database connection
+        from backend.transcriptions_db import engine
+        from sqlalchemy import text
+
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+
+        return {"status": "healthy", "database": "PostgreSQL connected"}
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Database unhealthy: {e}")
 
@@ -650,38 +620,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
 @app.get("/api/stats")
 async def get_statistics():
     """Get usage statistics."""
-    try:
-        total_count = collection.count_documents({})
-
-        # Aggregate by provider
-        provider_stats = list(
-            collection.aggregate(
-                [
-                    {
-                        "$group": {
-                            "_id": "$provider",
-                            "count": {"$sum": 1},
-                            "total_duration": {"$sum": "$duration"},
-                            "total_cost": {"$sum": "$cost_estimate"},
-                        }
-                    }
-                ]
-            )
-        )
-
-        # Recent activity
-        recent = collection.find().sort("created_at", -1).limit(5)
-        recent_files = [doc["filename"] for doc in recent]
-
-        return {
-            "total_transcriptions": total_count,
-            "provider_statistics": provider_stats,
-            "recent_files": recent_files,
-        }
-    except Exception as e:
-        logger.warning(f"MongoDB error in stats endpoint: {e}")
-        # Return default stats if MongoDB is not available
-        return {"total_transcriptions": 0, "provider_statistics": [], "recent_files": []}
+    return transcription_manager.get_statistics()
 
 
 def process_transcription_data(transcription_data: Dict[str, Any], enable_diarization: bool) -> Dict[str, Any]:
