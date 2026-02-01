@@ -22,27 +22,13 @@ spec:
     spec:
       containers:
         - name: backend
-          image: speacher-backend:latest
-          imagePullPolicy: Never
+          image: rafeekpro/speacher-backend:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8000
           env:
-            - name: MONGODB_URL
-              value: "mongodb://mongodb:27017"
-            - name: MONGODB_DATABASE
-              value: "speacher"
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: speacher-secrets
-                  key: aws-access-key-id
-                  optional: true
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: speacher-secrets
-                  key: aws-secret-access-key
-                  optional: true
+            - name: DATABASE_URL
+              value: "postgresql://speacher_user:SpeacherPro4_2024!@postgresql.database.svc.cluster.local:5432/speacher"
             - name: AWS_DEFAULT_REGION
               value: "us-east-1"
           resources:
