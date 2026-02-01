@@ -11,13 +11,15 @@ export const transcribeAudio = async (formData) => {
         headers: {
           'Content-Type': 'multipart/form-data'
         },
-        timeout: 60000 // 60 second timeout
+        timeout: 300000 // 5 minutes timeout for large files
       }
     );
-    
+
     return response.data;
   } catch (error) {
-    if (error.response) {
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('Transcription timed out. Large files may take several minutes. Please try again or check the History page later.');
+    } else if (error.response) {
       throw new Error(error.response.data.detail || 'Server error');
     } else if (error.request) {
       throw new Error('No response from server. Please check if the backend is running.');
