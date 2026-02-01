@@ -191,7 +191,7 @@ function AppContent() {
 
   const loadConfiguredProviders = useCallback(async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/keys');
+      const response = await fetch('/api/keys');
       if (response.ok) {
         const providersData = await response.json();
         setProviders(providersData);
@@ -221,46 +221,49 @@ function AppContent() {
     return () => clearInterval(interval);
   }, [checkBackendHealth, loadConfiguredProviders]);
 
-  const handleAudioRecorded = async (audioBlob: Blob, fileName: string = 'recording.wav') => {
+  const handleAudioRecorded = async (audioBlob: Blob, fileName: string = 'recording.wav', selectedLanguage?: string) => {
     // Check if provider is configured
     if (configuredProviders.length === 0) {
       setError('No providers configured. Please configure API keys in Settings.');
       return;
     }
-    
+
     if (!configuredProviders.find((p: any) => p.provider === settings.provider)) {
       setError(`${settings.provider.toUpperCase()} is not configured. Please configure API keys in Settings.`);
       return;
     }
-    
+
     setIsLoading(true);
     setError(null);
-    
+
+    // Use selected language if provided (from FileUpload), otherwise use settings
+    const language = selectedLanguage || settings.language;
+
     console.log('Sending transcription request:');
     console.log('- File:', fileName, 'Type:', audioBlob.type, 'Size:', audioBlob.size);
     console.log('- Provider:', settings.provider);
-    console.log('- Language:', settings.language);
-    
+    console.log('- Language:', language);
+
     try {
       const formData = new FormData();
       formData.append('file', audioBlob, fileName);
       formData.append('provider', settings.provider);
-      formData.append('language', settings.language);
+      formData.append('language', language);
       formData.append('enable_diarization', String(settings.enableDiarization));
       formData.append('max_speakers', String(settings.maxSpeakers));
       formData.append('include_timestamps', settings.includeTimestamps ? "1" : "0");
-      
+
       const result = await transcribeAudio(formData);
-      
+
       const newTranscription = {
         ...result,
         timestamp: new Date().toISOString(),
         fileName: fileName,
         audioUrl: audioBlob instanceof Blob ? URL.createObjectURL(audioBlob) : null
       };
-      
+
       setTranscriptions([newTranscription, ...transcriptions]);
-      
+
       // Navigate to results page after successful transcription
       navigate('/results');
     } catch (err: any) {

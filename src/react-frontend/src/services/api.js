@@ -1,11 +1,11 @@
 import axios from 'axios';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const API_BASE_URL = process.env.REACT_APP_API_URL || '';
 
 export const transcribeAudio = async (formData) => {
   try {
     const response = await axios.post(
-      `${API_BASE_URL}/transcribe`,
+      `${API_BASE_URL}/api/transcribe`,
       formData,
       {
         headers: {
@@ -29,7 +29,7 @@ export const transcribeAudio = async (formData) => {
 
 export const getTranscriptionHistory = async (limit = 50) => {
   try {
-    const response = await axios.get(`${API_BASE_URL}/history`, {
+    const response = await axios.get(`${API_BASE_URL}/api/history`, {
       params: { limit }
     });
     return response.data;
@@ -40,7 +40,7 @@ export const getTranscriptionHistory = async (limit = 50) => {
 
 export const getTranscriptionById = async (id) => {
   try {
-    const response = await axios.get(`${API_BASE_URL}/transcription/${id}`);
+    const response = await axios.get(`${API_BASE_URL}/api/transcription/${id}`);
     return response.data;
   } catch (error) {
     throw new Error('Failed to fetch transcription');
@@ -49,7 +49,7 @@ export const getTranscriptionById = async (id) => {
 
 export const deleteTranscription = async (id) => {
   try {
-    const response = await axios.delete(`${API_BASE_URL}/transcription/${id}`);
+    const response = await axios.delete(`${API_BASE_URL}/api/transcription/${id}`);
     return response.data;
   } catch (error) {
     throw new Error('Failed to delete transcription');
@@ -58,7 +58,7 @@ export const deleteTranscription = async (id) => {
 
 export const getStatistics = async () => {
   try {
-    const response = await axios.get(`${API_BASE_URL}/stats`);
+    const response = await axios.get(`${API_BASE_URL}/api/stats`);
     return response.data;
   } catch (error) {
     throw new Error('Failed to fetch statistics');

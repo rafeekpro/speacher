@@ -36,7 +36,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Import cloud wrappers for missing functions
 from backend import cloud_wrappers
-from backend.cloud_wrappers import aws_service
+# Removed: from backend.cloud_wrappers import aws_service
+# Use get_aws_service() function instead to pass credentials dynamically
 
 # Import API routers
 from backend.api_v2 import auth_router, users_router, projects_router
@@ -116,7 +117,7 @@ async def get_providers():
     return ["aws", "azure", "gcp"]
 
 
-@app.post("/transcribe", response_model=TranscriptionResponse)
+@app.post("/api/transcribe", response_model=TranscriptionResponse)
 async def transcribe(
     file: UploadFile = File(...),
     provider: str = Form("aws"),
@@ -248,8 +249,18 @@ async def transcribe(
             "file_size": file.size,
         }
 
-        result = collection.insert_one(doc)
-        doc_id = str(result.inserted_id)
+        # Try to save to MongoDB (optional, may not be configured)
+        doc_id = "local"
+        try:
+            result = collection.insert_one(doc)
+            doc_id = str(result.inserted_id)
+        except NameError:
+            # MongoDB collection not available - use local ID
+            doc_id = f"local-{uuid.uuid4()}"
+        except Exception as mongo_error:
+            # MongoDB connection failed - use local ID
+            logger.warning(f"MongoDB save failed: {mongo_error}")
+            doc_id = f"local-{uuid.uuid4()}"
 
         return TranscriptionResponse(
             id=doc_id,
@@ -298,11 +309,24 @@ async def process_aws_transcription(
             missing.append("s3_bucket_name")
         raise HTTPException(status_code=400, detail=f"AWS missing required fields: {', '.join(missing)}")
 
-    # Set AWS credentials
-    os.environ["AWS_ACCESS_KEY_ID"] = keys["access_key_id"]
-    os.environ["AWS_SECRET_ACCESS_KEY"] = keys["secret_access_key"]
-    if keys.get("region"):
-        os.environ["AWS_DEFAULT_REGION"] = keys["region"]
+    # Initialize AWS service with credentials from database
+    from backend.cloud_wrappers import get_aws_service
+    import sys
+
+    sys.stderr.write(f"[PROCESS_AWS] About to call get_aws_service\n")
+    sys.stderr.write(f"[PROCESS_AWS] Access key from DB: {keys['access_key_id'][:8]}...{keys['access_key_id'][-4:]}\n")
+    sys.stderr.write(f"[PROCESS_AWS] Secret key length: {len(keys['secret_access_key'])} chars\n")
+    sys.stderr.write(f"[PROCESS_AWS] Secret starts with gAAAAA: {keys['secret_access_key'].startswith('gAAAAA')}\n")
+    sys.stderr.flush()
+
+    service = get_aws_service(
+        access_key_id=keys["access_key_id"],
+        secret_access_key=keys["secret_access_key"],
+        region=keys.get("region", "us-east-1")
+    )
+
+    sys.stderr.write(f"[PROCESS_AWS] Service created successfully\n")
+    sys.stderr.flush()
 
     # Get S3 bucket name from configuration
     s3_bucket_name = keys.get("s3_bucket_name")
@@ -311,36 +335,53 @@ async def process_aws_transcription(
 
     # Upload to S3
     logger.info(f"Attempting to upload to S3 bucket: {s3_bucket_name}")
-    upload_result = aws_service.upload_file_to_s3(file_path, s3_bucket_name, filename)
+    upload_result = service.upload_file_to_s3(file_path, s3_bucket_name, filename)
     logger.debug(f"Upload result: {upload_result}")
 
-    # upload_file_to_s3 always returns a tuple (success, actual_bucket_name)
-    upload_success, actual_bucket_name = upload_result
-
-    if not upload_success:
+    # upload_file_to_s3 returns S3 URI string: "s3://bucket-name/object-name"
+    # Extract bucket name from the result
+    if not upload_result.startswith("s3://"):
         raise Exception("Failed to upload file to S3")
 
-    # Use the actual bucket name (might be different if original was taken)
-    bucket_name = actual_bucket_name
+    # Parse S3 URI to get bucket name
+    s3_uri_parts = upload_result.replace("s3://", "").split("/")
+    bucket_name = s3_uri_parts[0]
+    object_key = "/".join(s3_uri_parts[1:])
 
     # Start transcription job
     job_name = f"speacher-{uuid.uuid4()}"
 
-    trans_resp = aws_service.start_transcription_job(
+    # Build media file URI
+    media_file_uri = f"s3://{bucket_name}/{filename}"
+
+    # Determine media format from filename extension
+    media_format = os.path.splitext(filename)[1].lstrip('.')
+    if media_format == 'm4a':
+        media_format = 'mp4'  # AWS Transcribe doesn't support m4a
+
+    # Build settings for speaker diarization
+    settings = {}
+    if enable_diarization and max_speakers:
+        settings = {
+            "ShowSpeakerLabels": True,
+            "MaxSpeakerLabels": max_speakers
+        }
+
+    trans_resp = service.start_transcription_job(
         job_name=job_name,
-        bucket_name=bucket_name,
-        object_key=filename,
+        media_file_uri=media_file_uri,
+        media_format=media_format,
         language_code=language,
-        max_speakers=max_speakers if enable_diarization else 1,
+        settings=settings,
     )
     if not trans_resp:
         raise Exception("Failed to start AWS transcription job")
 
     # Wait for completion
-    job_info = aws_service.wait_for_job_completion(job_name)
+    job_info = service.wait_for_job_completion(job_name)
     if not job_info:
         # Try to get more details about the failure
-        status_info = aws_service.get_transcription_job_status(job_name)
+        status_info = service.get_transcription_job_status(job_name)
         if status_info and status_info.get("TranscriptionJob"):
             job_status = status_info.get("TranscriptionJob", {})
             failure_reason = job_status.get("FailureReason", "Unknown")
@@ -351,17 +392,18 @@ async def process_aws_transcription(
         raise Exception("AWS transcription job failed - unable to get job details")
 
     # Download and process result
-    if not job_info or "TranscriptionJob" not in job_info:
+    if not job_info:
         raise Exception("Job info is missing or invalid")
 
-    if "Transcript" not in job_info["TranscriptionJob"]:
+    # job_info is already the TranscriptionJob object (returned by wait_for_job_completion)
+    if "Transcript" not in job_info:
         raise Exception(
-            f"No transcript found in job. Job status: {job_info['TranscriptionJob'].get('TranscriptionJobStatus')}"
+            f"No transcript found in job. Job status: {job_info.get('TranscriptionJobStatus')}"
         )
 
-    transcript_uri = job_info["TranscriptionJob"]["Transcript"]["TranscriptFileUri"]
+    transcript_uri = job_info["Transcript"]["TranscriptFileUri"]
     logger.info(f"Downloading from URI: {transcript_uri}")
-    transcription_data = aws_service.download_transcription_result(transcript_uri)
+    transcription_data = service.download_transcription_result(transcript_uri)
 
     if transcription_data is None:
         raise Exception("Failed to download transcription result from AWS")
@@ -374,7 +416,7 @@ async def process_aws_transcription(
 
     # Clean up S3
     try:
-        aws_service.delete_file_from_s3(bucket_name, filename)
+        service.delete_file_from_s3(bucket_name, filename)
     except Exception:
         pass
 
@@ -479,7 +521,7 @@ async def process_gcp_transcription(
     return result
 
 
-@app.get("/history")
+@app.get("/api/history")
 async def get_transcription_history(
     search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
@@ -520,7 +562,7 @@ async def get_transcription_history(
         return []
 
 
-@app.get("/transcription/{transcription_id}")
+@app.get("/api/transcription/{transcription_id}")
 async def get_transcription(transcription_id: str) -> Dict[str, Any]:
     """Get a specific transcription by ID."""
     try:
@@ -540,7 +582,7 @@ async def get_transcription(transcription_id: str) -> Dict[str, Any]:
     return doc
 
 
-@app.delete("/transcription/{transcription_id}")
+@app.delete("/api/transcription/{transcription_id}")
 async def delete_transcription(transcription_id: str):
     """Delete a transcription by ID."""
     try:
@@ -605,7 +647,7 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     await handle_websocket_streaming(websocket, client_id)
 
 
-@app.get("/stats")
+@app.get("/api/stats")
 async def get_statistics():
     """Get usage statistics."""
     try:

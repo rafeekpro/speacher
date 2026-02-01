@@ -9,22 +9,65 @@ import time
 from typing import Any, Dict, Optional
 from botocore.exceptions import ClientError
 
+# Configure logger to output to stdout
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Add handler if not already present
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 
 class AWSService:
     """AWS service wrapper for transcription"""
 
-    def __init__(self):
-        self.s3_client = boto3.client("s3")
-        self.transcribe_client = boto3.client("transcribe")
+    def __init__(self, access_key_id: str = None, secret_access_key: str = None, region: str = None):
+        """Initialize AWS service with credentials.
+
+        Args:
+            access_key_id: AWS access key ID (optional, reads from env if None)
+            secret_access_key: AWS secret access key (optional, reads from env if None)
+            region: AWS region (optional, reads from env if None)
+        """
+        self.access_key_id = access_key_id
+        self.secret_access_key = secret_access_key
+        self.region = region or os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+
+        # Log credentials (safely) - using print for guaranteed output
+        print(f"[AWS SERVICE] Initializing AWS service")
+        if access_key_id:
+            print(f"[AWS SERVICE] Access key: {access_key_id[:8]}...{access_key_id[-4:]}")
+            print(f"[AWS SERVICE] Secret key length: {len(secret_access_key) if secret_access_key else 0} chars")
+        else:
+            print(f"[AWS SERVICE] WARNING: No access_key_id provided!")
+
+        # Initialize clients with credentials or from environment
+        client_config = {}
+        if access_key_id and secret_access_key:
+            client_config['aws_access_key_id'] = access_key_id
+            client_config['aws_secret_access_key'] = secret_access_key
+
+        if region:
+            client_config['region_name'] = region
+        elif os.getenv("AWS_DEFAULT_REGION"):
+            client_config['region_name'] = os.getenv("AWS_DEFAULT_REGION")
+
+        self.s3_client = boto3.client("s3", **client_config)
+        self.transcribe_client = boto3.client("transcribe", **client_config)
 
     def upload_file_to_s3(self, file_path: str, bucket_name: str, object_name: str) -> str:
         """Upload file to S3"""
         try:
+            logger.info(f"Uploading {file_path} to s3://{bucket_name}/{object_name}")
             self.s3_client.upload_file(file_path, bucket_name, object_name)
+            logger.info(f"Upload successful: s3://{bucket_name}/{object_name}")
             return f"s3://{bucket_name}/{object_name}"
         except ClientError as e:
+            logger.error(f"S3 upload error: {e}")
             raise Exception(f"Failed to upload to S3: {e}")
 
     def start_transcription_job(
@@ -32,6 +75,11 @@ class AWSService:
     ) -> Dict[str, Any]:
         """Start AWS Transcribe job"""
         try:
+            logger.info(f"Starting AWS Transcribe job: {job_name}")
+            logger.info(f"  Media URI: {media_file_uri}")
+            logger.info(f"  Format: {media_format}, Language: {language_code}")
+            logger.info(f"  Settings: {settings}")
+
             response = self.transcribe_client.start_transcription_job(
                 TranscriptionJobName=job_name,
                 Media={"MediaFileUri": media_file_uri},
@@ -39,29 +87,40 @@ class AWSService:
                 LanguageCode=language_code,
                 Settings=settings,
             )
+
+            logger.info(f"Job started successfully: {response['TranscriptionJob']['TranscriptionJobStatus']}")
             return response
         except ClientError as e:
+            logger.error(f"Failed to start transcription job: {e}")
             raise Exception(f"Failed to start transcription job: {e}")
 
     def wait_for_job_completion(self, job_name: str, timeout: int = 3600) -> Dict[str, Any]:
         """Wait for transcription job to complete"""
         start_time = time.time()
+        logger.info(f"Waiting for job {job_name} to complete (timeout: {timeout}s)")
+
         while time.time() - start_time < timeout:
             try:
                 response = self.transcribe_client.get_transcription_job(TranscriptionJobName=job_name)
-                status = response["TranscriptionJob"]["TranscriptionJobStatus"]
+                job = response.get("TranscriptionJob", {})
+                status = job.get("TranscriptionJobStatus")
+
+                logger.debug(f"Job {job_name} status: {status}")
 
                 if status == "COMPLETED":
+                    logger.info(f"Job {job_name} completed successfully")
                     return response["TranscriptionJob"]
                 elif status == "FAILED":
-                    raise Exception(
-                        f"Transcription job failed: {response['TranscriptionJob'].get('FailureReason', 'Unknown')}"
-                    )
+                    failure_reason = job.get("FailureReason", "Unknown")
+                    logger.error(f"Job {job_name} failed: {failure_reason}")
+                    raise Exception(f"Transcription job failed: {failure_reason}")
 
                 time.sleep(10)
             except ClientError as e:
+                logger.error(f"Error checking job status for {job_name}: {e}")
                 time.sleep(10)
 
+        logger.error(f"Job {job_name} timed out after {timeout}s")
         raise Exception("Transcription job timed out")
 
     def get_transcription_job_status(self, job_name: str) -> Dict[str, Any]:
@@ -75,16 +134,21 @@ class AWSService:
     def download_transcription_result(self, transcript_uri: str) -> Dict[str, Any]:
         """Download transcription result from S3"""
         try:
-            # Parse S3 URI
-            parts = transcript_uri.replace("s3://", "").split("/")
-            bucket_name = parts[0]
-            object_name = "/".join(parts[1:])
-
-            response = self.s3_client.get_object(Bucket=bucket_name, Key=object_name)
+            import requests
             import json
 
-            return json.loads(response["Body"].read().decode("utf-8"))
-        except ClientError as e:
+            logger.info(f"Downloading transcription from: {transcript_uri}")
+
+            # AWS Transcribe returns HTTPS URL, download it directly
+            response = requests.get(transcript_uri)
+            response.raise_for_status()
+
+            data = response.json()
+            logger.info(f"Successfully downloaded transcription ({len(data)} keys)")
+
+            return data
+        except Exception as e:
+            logger.error(f"Failed to download transcription: {e}")
             raise Exception(f"Failed to download transcription: {e}")
 
     def delete_file_from_s3(self, bucket_name: str, object_name: str) -> bool:
@@ -96,8 +160,24 @@ class AWSService:
             raise Exception(f"Failed to delete from S3: {e}")
 
 
-# Create AWS service instance
-aws_service = AWSService()
+# AWS service instance will be created with credentials at runtime
+aws_service = None
+
+def get_aws_service(access_key_id: str = None, secret_access_key: str = None, region: str = None) -> AWSService:
+    """Get or create AWS service instance with credentials.
+
+    Args:
+        access_key_id: AWS access key ID
+        secret_access_key: AWS secret access key
+        region: AWS region
+
+    Returns:
+        AWSService instance
+    """
+    global aws_service
+    if aws_service is None or access_key_id:
+        aws_service = AWSService(access_key_id, secret_access_key, region)
+    return aws_service
 
 
 # Azure wrappers

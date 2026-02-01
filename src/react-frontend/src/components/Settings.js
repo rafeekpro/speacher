@@ -83,7 +83,7 @@ const Settings = ({ settings, onSettingsChange, onClose }) => {
 
   const loadConfiguredProviders = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/keys');
+      const response = await fetch('/api/keys');
       if (response.ok) {
         const providers = await response.json();
         setConfiguredProviders(providers);
