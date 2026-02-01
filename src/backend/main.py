@@ -406,11 +406,8 @@ async def process_aws_transcription(
     result = process_transcription_data(transcription_data, enable_diarization)
     logger.debug(f"Processed result: {result}")
 
-    # Clean up S3
-    try:
-        service.delete_file_from_s3(bucket_name, filename)
-    except Exception:
-        pass
+    # NOTE: S3 files are now preserved for user management
+    # Users can delete files via the /files endpoint
 
     return result
 
