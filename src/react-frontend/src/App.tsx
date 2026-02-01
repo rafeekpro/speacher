@@ -29,6 +29,7 @@ import History from './components/History';
 import Statistics from './components/Statistics';
 import Settings from './components/Settings';
 import APIKeysSettings from './components/APIKeysSettings';
+import FileManagement from './components/FileManagement';
 
 // Services
 import { transcribeAudio, checkHealth } from './services/api';
@@ -370,13 +371,21 @@ function AppContent() {
             </Box>
           } 
         />
-        <Route 
-          path="/api-keys" 
+        <Route
+          path="/api-keys"
           element={
             <Box sx={{ p: 3 }}>
               <APIKeysSettings />
             </Box>
-          } 
+          }
+        />
+        <Route
+          path="/files"
+          element={
+            <Box sx={{ p: 3 }}>
+              <FileManagement />
+            </Box>
+          }
         />
       </Routes>
 

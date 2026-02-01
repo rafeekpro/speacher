@@ -623,6 +623,217 @@ async def get_statistics():
     return transcription_manager.get_statistics()
 
 
+@app.get("/api/files")
+async def list_s3_files():
+    """List all files in S3 bucket."""
+    try:
+        # Get AWS keys from database
+        api_keys = api_keys_manager.get_api_keys("aws")
+        if not api_keys:
+            raise HTTPException(status_code=400, detail="AWS provider is not configured")
+
+        keys = api_keys.get("keys", {})
+        s3_bucket_name = keys.get("s3_bucket_name")
+
+        if not s3_bucket_name:
+            raise HTTPException(status_code=400, detail="AWS S3 bucket name is not configured")
+
+        # Initialize AWS service
+        from backend.cloud_wrappers import get_aws_service
+        service = get_aws_service(
+            access_key_id=keys["access_key_id"],
+            secret_access_key=keys["secret_access_key"],
+            region=keys.get("region", "us-east-1")
+        )
+
+        # List files
+        files = service.list_s3_files(s3_bucket_name)
+
+        # Get transcription count for each file
+        files_with_counts = []
+        for file_info in files:
+            filename = file_info['key']
+            # Count transcriptions for this file
+            transcriptions = transcription_manager.get_transcription_history(
+                search=filename,
+                limit=1000
+            )
+            # Filter for exact filename match
+            exact_matches = [t for t in transcriptions if t.get('filename') == filename]
+
+            files_with_counts.append({
+                **file_info,
+                'transcription_count': len(exact_matches)
+            })
+
+        return {"files": files_with_counts}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to list S3 files: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+
+
+@app.delete("/api/files/{filename}")
+async def delete_s3_file(filename: str):
+    """Delete a file from S3 bucket."""
+    try:
+        # Get AWS keys from database
+        api_keys = api_keys_manager.get_api_keys("aws")
+        if not api_keys:
+            raise HTTPException(status_code=400, detail="AWS provider is not configured")
+
+        keys = api_keys.get("keys", {})
+        s3_bucket_name = keys.get("s3_bucket_name")
+
+        if not s3_bucket_name:
+            raise HTTPException(status_code=400, detail="AWS S3 bucket name is not configured")
+
+        # Initialize AWS service
+        from backend.cloud_wrappers import get_aws_service
+        service = get_aws_service(
+            access_key_id=keys["access_key_id"],
+            secret_access_key=keys["secret_access_key"],
+            region=keys.get("region", "us-east-1")
+        )
+
+        # Delete file from S3
+        success = service.delete_file_from_s3(s3_bucket_name, filename)
+
+        if success:
+            return {"message": f"File '{filename}' deleted successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to delete file")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete S3 file: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
+
+
+@app.post("/api/files/{filename}/retranscribe")
+async def retranscribe_file(
+    filename: str,
+    language: str = Form("en-US"),
+    enable_diarization: bool = Form(True),
+    max_speakers: Optional[int] = Form(4)
+):
+    """Re-transcribe an existing S3 file."""
+    try:
+        # Get AWS keys from database
+        api_keys = api_keys_manager.get_api_keys("aws")
+        if not api_keys:
+            raise HTTPException(status_code=400, detail="AWS provider is not configured")
+
+        keys = api_keys.get("keys", {})
+
+        if not keys.get("access_key_id") or not keys.get("secret_access_key") or not keys.get("s3_bucket_name"):
+            raise HTTPException(status_code=400, detail="AWS credentials or bucket not configured")
+
+        # Initialize AWS service
+        from backend.cloud_wrappers import get_aws_service
+        service = get_aws_service(
+            access_key_id=keys["access_key_id"],
+            secret_access_key=keys["secret_access_key"],
+            region=keys.get("region", "us-east-1")
+        )
+
+        s3_bucket_name = keys.get("s3_bucket_name")
+        media_file_uri = f"s3://{s3_bucket_name}/{filename}"
+
+        # Determine media format from filename extension
+        import os
+        media_format = os.path.splitext(filename)[1].lstrip('.')
+        if media_format == 'm4a':
+            media_format = 'mp4'
+
+        # Start transcription job
+        job_name = f"speacher-retranscribe-{uuid.uuid4()}"
+
+        # Build settings for speaker diarization
+        settings = {}
+        if enable_diarization and max_speakers:
+            settings = {
+                "ShowSpeakerLabels": True,
+                "MaxSpeakerLabels": max_speakers
+            }
+
+        # Start transcription
+        trans_resp = service.start_transcription_job(
+            job_name=job_name,
+            media_file_uri=media_file_uri,
+            media_format=media_format,
+            language_code=language,
+            settings=settings,
+        )
+
+        if not trans_resp:
+            raise Exception("Failed to start AWS transcription job")
+
+        # Wait for completion
+        job_info = service.wait_for_job_completion(job_name)
+        if not job_info:
+            raise Exception("AWS transcription job failed")
+
+        # Download result
+        if "Transcript" not in job_info:
+            raise Exception("No transcript found in job")
+
+        transcript_uri = job_info["Transcript"]["TranscriptFileUri"]
+        transcription_data = service.download_transcription_result(transcript_uri)
+
+        if transcription_data is None:
+            raise Exception("Failed to download transcription result")
+
+        # Process transcription data
+        result = process_transcription_data(transcription_data, enable_diarization)
+
+        # Extract transcript text and speakers
+        transcript_text = result.get("transcript", "")
+        speakers = []
+
+        if enable_diarization and result.get("speakers"):
+            speakers = result["speakers"]
+
+        # Calculate duration and cost
+        duration = result.get("duration", 0)
+        cost_estimate = calculate_cost("aws", duration)
+
+        # Store in PostgreSQL
+        doc_id = transcription_manager.save_transcription(
+            filename=filename,
+            provider="aws",
+            language=language,
+            transcript=transcript_text,
+            speakers=speakers,
+            enable_diarization=enable_diarization,
+            max_speakers=max_speakers,
+            duration=duration,
+            cost_estimate=cost_estimate,
+            file_size=0,  # File size unknown for re-transcription
+            audio_file_id=None,
+            user_id=None,
+        )
+
+        return {
+            "id": doc_id,
+            "transcript": transcript_text,
+            "speakers": speakers,
+            "provider": "aws",
+            "language": language,
+            "duration": duration,
+            "cost_estimate": cost_estimate,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to re-transcribe file: {e}")
+        raise HTTPException(status_code=500, detail=f"Re-transcription failed: {str(e)}")
+
+
 def process_transcription_data(transcription_data: Dict[str, Any], enable_diarization: bool) -> Dict[str, Any]:
     """Process transcription data and extract relevant information."""
     result = {"transcript": "", "speakers": [], "duration": 0.0}

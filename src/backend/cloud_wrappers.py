@@ -6,7 +6,7 @@ import logging
 import os
 import boto3
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from botocore.exceptions import ClientError
 
 # Configure logger to output to stdout
@@ -158,6 +158,40 @@ class AWSService:
             return True
         except ClientError as e:
             raise Exception(f"Failed to delete from S3: {e}")
+
+    def list_s3_files(self, bucket_name: str) -> List[Dict[str, Any]]:
+        """List all files in S3 bucket.
+
+        Args:
+            bucket_name: S3 bucket name
+
+        Returns:
+            List of files with metadata: key, size, last_modified, etag
+        """
+        try:
+            logger.info(f"Listing files in S3 bucket: {bucket_name}")
+            files = []
+
+            # Use pagination to handle buckets with many objects
+            paginator = self.s3_client.get_paginator('list_objects_v2')
+            page_iterator = paginator.paginate(Bucket=bucket_name)
+
+            for page in page_iterator:
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        files.append({
+                            'key': obj['Key'],
+                            'size': obj['Size'],
+                            'last_modified': obj['LastModified'],
+                            'etag': obj['ETag'].strip('"')
+                        })
+
+            logger.info(f"Found {len(files)} files in bucket {bucket_name}")
+            return files
+
+        except ClientError as e:
+            logger.error(f"Failed to list S3 files: {e}")
+            raise Exception(f"Failed to list S3 files: {e}")
 
 
 # AWS service instance will be created with credentials at runtime

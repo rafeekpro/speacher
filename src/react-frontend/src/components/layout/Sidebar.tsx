@@ -48,6 +48,7 @@ const Sidebar: React.FC<SidebarProps> = ({
     { path: '/record', label: 'Record', icon: 'mic' },
     { path: '/upload', label: 'Upload', icon: 'upload' },
     { path: '/history', label: 'History', icon: 'history' },
+    { path: '/files', label: 'Files', icon: 'file' },
     { path: '/statistics', label: 'Statistics', icon: 'chart' },
     { path: '/settings', label: 'Settings', icon: 'settings' }
   ];
