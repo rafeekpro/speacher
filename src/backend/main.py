@@ -36,40 +36,27 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Import cloud wrappers for missing functions
 from backend import cloud_wrappers
+from backend.cloud_wrappers import aws_service
 
-# Import API keys manager
+# Import API routers
+from backend.api_v2 import auth_router, users_router, projects_router
+
+# Import API keys manager (now using PostgreSQL)
 from backend.api_keys import APIKeysManager
 
-# Import API v2 routers
-from backend.api_v2 import auth_router, projects_router, users_router
-
-# Import streaming module for real-time transcription
-from backend.streaming import handle_websocket_streaming
-from speacher import aws as aws_service
-
 # Configuration from environment variables
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-MONGODB_DB = os.getenv("MONGODB_DB", "speacher")
-MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "transcriptions")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://speacher_user:SpeacherPro4_2024!@10.0.0.5:30432/speacher")
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB limit
 
 # Cloud provider configurations
-# S3 bucket names are now configured per-provider in the database
 AZURE_STORAGE_ACCOUNT = os.getenv("AZURE_STORAGE_ACCOUNT")
 AZURE_STORAGE_KEY = os.getenv("AZURE_STORAGE_KEY")
-AZURE_CONTAINER_NAME = os.getenv("AZURE_CONTAINER_NAME", "speacher")
-# GCS bucket names are now configured per-provider in the database
+AZURE_CONTAINER_NAME = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "speacher")
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+GCP_BUCKET_NAME = os.getenv("GCP_BUCKET_NAME", "speacher-gcp")
 
-# Initialize MongoDB client and collection
-mongo_client = MongoClient(MONGODB_URI)
-db = mongo_client[MONGODB_DB]
-collection = db[MONGODB_COLLECTION]
-
-# Initialize API Keys Manager
-api_keys_manager = APIKeysManager(MONGODB_URI, MONGODB_DB)
-
-# MongoDB collections
-transcriptions_collection = db["transcriptions"]
+# Initialize API Keys Manager (PostgreSQL)
+api_keys_manager = APIKeysManager(DATABASE_URL)
 
 
 class CloudProvider(str, Enum):
