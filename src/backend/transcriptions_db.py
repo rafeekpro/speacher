@@ -172,6 +172,7 @@ class TranscriptionManager:
         search: Optional[str] = None,
         date_from: Optional[datetime] = None,
         provider: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Get transcription history with optional filtering.
@@ -181,6 +182,7 @@ class TranscriptionManager:
             search: Search term for filename
             date_from: Filter by date (inclusive)
             provider: Filter by provider
+            user_id: Filter by user ID (if provided)
 
         Returns:
             List of transcription dictionaries
@@ -191,6 +193,10 @@ class TranscriptionManager:
             query = session.query(Transcription).filter(Transcription.status == TranscriptionStatus.COMPLETED)
 
             # Apply filters
+            if user_id:
+                # Filter by user_id
+                query = query.filter(Transcription.user_id == user_id)
+
             if search:
                 # Search in filename within metadata
                 query = query.filter(Transcription.meta_data["filename"].astext.ilike(f"%{search}%"))
@@ -315,9 +321,9 @@ class TranscriptionManager:
             total_cost = 0.0
 
             for t in all_transcriptions:
-                provider = t.metadata.get("provider", "unknown") if t.metadata else "unknown"
-                duration = t.metadata.get("duration", 0.0) if t.metadata else 0.0
-                cost = t.metadata.get("cost_estimate", 0.0) if t.metadata else 0.0
+                provider = t.meta_data.get("provider", "unknown") if t.meta_data else "unknown"
+                duration = t.meta_data.get("duration", 0.0) if t.meta_data else 0.0
+                cost = t.meta_data.get("cost_estimate", 0.0) if t.meta_data else 0.0
 
                 if provider not in provider_stats:
                     provider_stats[provider] = {"count": 0, "total_duration": 0.0, "total_cost": 0.0}
@@ -349,7 +355,7 @@ class TranscriptionManager:
                 .all()
             )
 
-            recent_files = [t.metadata.get("filename", "") if t.metadata else "" for t in recent_transcriptions]
+            recent_files = [t.meta_data.get("filename", "") if t.meta_data else "" for t in recent_transcriptions]
 
             session.close()
 

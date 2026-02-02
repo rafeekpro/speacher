@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 # Load environment variables from .env file
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -44,6 +44,10 @@ from api_keys import APIKeysManager
 
 # Import transcription database manager (PostgreSQL)
 from transcriptions_db import transcription_manager
+
+# Import authentication dependencies
+from backend.auth import require_auth
+from backend.models import UserDB
 
 # Configuration from environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://speacher_user:SpeacherPro4_2024!@10.0.0.5:30432/speacher")
@@ -125,6 +129,7 @@ async def transcribe(
     enable_diarization: bool = Form(True),
     max_speakers: Optional[int] = Form(4),
     include_timestamps: bool = Form(True),
+    current_user: UserDB = Depends(require_auth),
 ):
     """
     Upload an audio file and transcribe it using the selected cloud provider.
@@ -247,7 +252,7 @@ async def transcribe(
             cost_estimate=cost_estimate,
             file_size=file.size if hasattr(file, 'size') else len(file_content),
             audio_file_id=None,  # Not tracking audio files separately for now
-            user_id=None,  # Anonymous user for now
+            user_id=current_user.id,  # Authenticated user
         )
 
         if not doc_id:
@@ -519,9 +524,10 @@ async def get_transcription_history(
     date_from: Optional[str] = Query(None),
     provider: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
+    current_user: UserDB = Depends(require_auth),
 ) -> List[Dict[str, Any]]:
     """
-    Get transcription history with optional filtering.
+    Get transcription history for the authenticated user with optional filtering.
     """
     logger.info(f"DATABASE_URL being used: {os.getenv('DATABASE_URL', 'NOT_SET')}")
 
@@ -533,36 +539,58 @@ async def get_transcription_history(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use ISO format: YYYY-MM-DD")
 
-    # Fetch from PostgreSQL
-    logger.info(f"Fetching transcription history with limit={limit}")
+    # Fetch from PostgreSQL for the authenticated user
+    logger.info(f"Fetching transcription history for user {current_user.id} with limit={limit}")
     result = transcription_manager.get_transcription_history(
         limit=limit,
         search=search,
         date_from=date_from_dt,
         provider=provider,
+        user_id=current_user.id,
     )
     logger.info(f"Returning {len(result)} transcriptions")
     return result
 
 
 @app.get("/api/transcription/{transcription_id}")
-async def get_transcription(transcription_id: str) -> Dict[str, Any]:
-    """Get a specific transcription by ID."""
+async def get_transcription(
+    transcription_id: str,
+    current_user: UserDB = Depends(require_auth),
+) -> Dict[str, Any]:
+    """Get a specific transcription by ID (user must own it)."""
     result = transcription_manager.get_transcription_by_id(transcription_id)
 
     if not result:
         raise HTTPException(status_code=404, detail="Transcription not found")
 
+    # Verify ownership
+    if result.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not have permission to access this transcription")
+
     return result
 
 
 @app.delete("/api/transcription/{transcription_id}")
-async def delete_transcription(transcription_id: str):
-    """Delete a transcription by ID."""
+async def delete_transcription(
+    transcription_id: str,
+    current_user: UserDB = Depends(require_auth),
+):
+    """Delete a transcription by ID (user must own it)."""
+    # First, get the transcription to verify ownership
+    result = transcription_manager.get_transcription_by_id(transcription_id)
+
+    if not result:
+        raise HTTPException(status_code=404, detail="Transcription not found")
+
+    # Verify ownership
+    if result.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not have permission to delete this transcription")
+
+    # Delete the transcription
     success = transcription_manager.delete_transcription(transcription_id)
 
     if not success:
-        raise HTTPException(status_code=404, detail="Transcription not found")
+        raise HTTPException(status_code=500, detail="Failed to delete transcription")
 
     return {"message": "Transcription deleted successfully"}
 
@@ -723,7 +751,8 @@ async def retranscribe_file(
     filename: str,
     language: str = Form("en-US"),
     enable_diarization: bool = Form(True),
-    max_speakers: Optional[int] = Form(4)
+    max_speakers: Optional[int] = Form(4),
+    current_user: UserDB = Depends(require_auth),
 ):
     """Re-transcribe an existing S3 file."""
     try:
@@ -819,7 +848,7 @@ async def retranscribe_file(
             cost_estimate=cost_estimate,
             file_size=0,  # File size unknown for re-transcription
             audio_file_id=None,
-            user_id=None,
+            user_id=current_user.id,  # Authenticated user
         )
 
         return {
