@@ -1,26 +1,4 @@
 services:
-  mongodb:
-    image: mongo:7.0
-    container_name: speacher-mongodb
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: speacher_admin_pass
-      MONGO_INITDB_DATABASE: speacher
-    volumes:
-      - mongodb_data:/data/db
-      - ./docker/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/speacher --quiet
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    networks:
-      - speacher-network
-
   backend:
     build:
       context: .
@@ -30,11 +8,9 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # MongoDB configuration
-      MONGODB_URI: mongodb://speacher_user:speacher_pass@mongodb:27017/speecher?authSource=speecher
-      MONGODB_DB: speacher
-      MONGODB_COLLECTION: transcriptions
-      
+      # PostgreSQL configuration
+      DATABASE_URL: postgresql://speecher_user:speecher_pass@10.0.0.5:30432/speecher
+
       # AWS Configuration
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
@@ -63,9 +39,6 @@ services:
       - ./tests:/app/tests:ro
       # Mount for temporary files
       - /tmp:/tmp
-    depends_on:
-      mongodb:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -105,25 +78,20 @@ services:
       dockerfile: docker/test.Dockerfile
     container_name: speacher-tests
     environment:
-      # Test database configuration - completely isolated from development
-      MONGODB_URI: mongodb://speacher_user:speacher_pass@mongodb:27017/speacher_test?authSource=speecher
-      MONGODB_DB: speacher_test
-      MONGODB_COLLECTION: transcriptions_test
-      
-      # Test isolation flag
-      TEST_ISOLATION: "true"
-      
+      # Test database configuration - uses PostgreSQL
+      DATABASE_URL: postgresql://speecher_user:speecher_pass@10.0.0.5:30432/speecher_test
+
       # Backend service URL for integration tests
       BACKEND_URL: http://backend:8000
-      
+
       # Python configuration
       PYTHONUNBUFFERED: 1
-      
+
       # AWS Test Configuration (optional)
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
-      
+
       # Test environment indicator
       ENVIRONMENT: test
     volumes:
@@ -132,53 +100,18 @@ services:
       - ./test_results:/app/test_results
       - ./docker/scripts:/app/scripts:ro
     depends_on:
-      mongodb:
-        condition: service_healthy
       backend:
         condition: service_healthy
     networks:
       - speacher-network
     profiles:
       - test  # Only run when explicitly requested
-    # Command includes database cleanup before tests
     command: >
       sh -c "
         echo 'Initializing test environment...' &&
-        echo 'Cleaning up test database...' &&
-        python -c \"
-        import pymongo
-        from urllib.parse import quote_plus
-        
-        # Connect to MongoDB
-        client = pymongo.MongoClient('mongodb://speacher_user:speacher_pass@mongodb:27017/?authSource=speecher')
-        
-        # Drop the test database if it exists
-        print('Dropping existing test database...')
-        client.drop_database('speacher_test')
-        
-        # Create fresh test database
-        test_db = client['speacher_test']
-        
-        # Create test collections with proper indexes
-        print('Creating test collections...')
-        test_db.create_collection('transcriptions_test')
-        test_db['transcriptions_test'].create_index('created_at')
-        test_db['transcriptions_test'].create_index('user_id')
-        
-        # Verify database creation
-        print(f'Test database ready: {test_db.name}')
-        print(f'Collections: {test_db.list_collection_names()}')
-        
-        client.close()
-        print('Test database initialization complete!')
-        \" &&
-        echo 'Running tests with isolated database...' &&
+        echo 'Running tests...' &&
         pytest tests/ -v --tb=short --junit-xml=/app/test_results/results.xml --maxfail=10 -x
       "
-
-volumes:
-  mongodb_data:
-    driver: local
 
 networks:
   speacher-network:
