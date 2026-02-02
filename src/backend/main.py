@@ -37,13 +37,13 @@ from backend import cloud_wrappers
 # Use get_aws_service() function instead to pass credentials dynamically
 
 # Import API routers
-from backend.api_v2 import auth_router, users_router, projects_router
+from api_v2 import auth_router, users_router, projects_router
 
 # Import API keys manager (now using PostgreSQL)
-from backend.api_keys import APIKeysManager
+from api_keys import APIKeysManager
 
 # Import transcription database manager (PostgreSQL)
-from backend.transcriptions_db import transcription_manager
+from transcriptions_db import transcription_manager
 
 # Configuration from environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://speacher_user:SpeacherPro4_2024!@10.0.0.5:30432/speacher")
@@ -251,8 +251,11 @@ async def transcribe(
         )
 
         if not doc_id:
-            logger.warning("Failed to save transcription to database, using local ID")
-            doc_id = f"local-{uuid.uuid4()}"
+            logger.error("Failed to save transcription to database!")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to save transcription to database. Please check database connection."
+            )
 
         return TranscriptionResponse(
             id=doc_id,
@@ -520,6 +523,8 @@ async def get_transcription_history(
     """
     Get transcription history with optional filtering.
     """
+    logger.info(f"DATABASE_URL being used: {os.getenv('DATABASE_URL', 'NOT_SET')}")
+
     # Convert date_from string to datetime if provided
     date_from_dt = None
     if date_from:
@@ -529,12 +534,15 @@ async def get_transcription_history(
             raise HTTPException(status_code=400, detail="Invalid date format. Use ISO format: YYYY-MM-DD")
 
     # Fetch from PostgreSQL
-    return transcription_manager.get_transcription_history(
+    logger.info(f"Fetching transcription history with limit={limit}")
+    result = transcription_manager.get_transcription_history(
         limit=limit,
         search=search,
         date_from=date_from_dt,
         provider=provider,
     )
+    logger.info(f"Returning {len(result)} transcriptions")
+    return result
 
 
 @app.get("/api/transcription/{transcription_id}")
