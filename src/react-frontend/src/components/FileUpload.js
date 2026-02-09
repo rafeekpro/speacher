@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { Upload, File, X, AlertCircle, CheckCircle, Languages } from 'lucide-react';
 import './FileUpload.css';
+import TranscriptionProgress from './TranscriptionProgress';
 
 const SUPPORTED_LANGUAGES = [
   { code: 'en-US', name: 'English (US)' },
@@ -17,7 +18,7 @@ const SUPPORTED_LANGUAGES = [
   { code: 'zh-CN', name: 'Chinese (Mandarin)' }
 ];
 
-const FileUpload = ({ onFilesUploaded, isLoading, settings }) => {
+const FileUpload = ({ onFilesUploaded, isLoading, settings, currentJob, onJobComplete, onJobError }) => {
   const [files, setFiles] = useState([]);
   const [dragActive, setDragActive] = useState(false);
   const [selectedLanguage, setSelectedLanguage] = useState(settings?.language || 'en-US');
@@ -111,7 +112,18 @@ const FileUpload = ({ onFilesUploaded, isLoading, settings }) => {
 
   return (
     <div className="file-upload">
-      <div 
+      {/* Show TranscriptionProgress when there's an active job */}
+      {currentJob && onJobComplete && onJobError && (
+        <div className="progress-container">
+          <TranscriptionProgress
+            jobId={currentJob.id}
+            onComplete={onJobComplete}
+            onError={onJobError}
+          />
+        </div>
+      )}
+
+      <div
         className={`upload-zone ${dragActive ? 'drag-active' : ''}`}
         onDragEnter={handleDrag}
         onDragLeave={handleDrag}

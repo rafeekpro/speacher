@@ -25,8 +25,9 @@ import {
 import WaveSurfer from 'wavesurfer.js';
 import AudioVisualizer from './AudioVisualizer';
 import { convertWebMToWav } from '../utils/audioConverter';
+import TranscriptionProgress from './TranscriptionProgress';
 
-const AudioRecorder = ({ onAudioRecorded, isLoading, settings }) => {
+const AudioRecorder = ({ onAudioRecorded, isLoading, settings, currentJob, onJobComplete, onJobError }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [audioBlob, setAudioBlob] = useState(null);
   const [audioUrl, setAudioUrl] = useState(null);
@@ -210,7 +211,18 @@ const AudioRecorder = ({ onAudioRecorded, isLoading, settings }) => {
           <MicIcon className="text-blue-600" size={24} />
           Audio Recorder
         </Typography>
-        
+
+        {/* Show TranscriptionProgress when there's an active job */}
+        {currentJob && onJobComplete && onJobError && (
+          <Box sx={{ mt: 3 }}>
+            <TranscriptionProgress
+              jobId={currentJob.id}
+              onComplete={onJobComplete}
+              onError={onJobError}
+            />
+          </Box>
+        )}
+
         <Box sx={{ mt: 3 }}>
           {!isRecording && !audioBlob && (
             <Box sx={{ textAlign: 'center', py: 4 }}>

@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 
 // Context and Layout
-import { AuthProvider } from './contexts/AuthContext';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { Layout } from './components/layout';
 
 // Components
@@ -30,9 +30,14 @@ import Statistics from './components/Statistics';
 import Settings from './components/Settings';
 import APIKeysSettings from './components/APIKeysSettings';
 import FileManagement from './components/FileManagement';
+import { LoginForm } from './components/auth/LoginForm';
+import { RegisterForm } from './components/auth/RegisterForm';
 
 // Services
-import { transcribeAudio, checkHealth } from './services/api';
+import { transcribeAudio, transcribeAudioAsync, checkHealth } from './services/api';
+
+// Utils
+import { setupAxiosInterceptors } from './utils/axiosInterceptors';
 
 // Create MUI theme
 const theme = createTheme({
@@ -97,14 +102,33 @@ const theme = createTheme({
   },
 });
 
+// Protected Route Component
+const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { isAuthenticated, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <>{children}</>;
+};
+
 // Dashboard component (new)
-const Dashboard: React.FC<{ 
-  transcriptions: any[]; 
+const Dashboard: React.FC<{
+  transcriptions: any[];
   backendStatus: string;
   providers: any[];
 }> = ({ transcriptions, backendStatus, providers }) => {
   const navigate = useNavigate();
-  
+
   return (
     <div className="p-6">
       <h1 className="text-3xl font-bold mb-4">Dashboard</h1>
@@ -122,7 +146,7 @@ const Dashboard: React.FC<{
         <div className="bg-white p-6 rounded-lg shadow">
           <h2 className="text-xl font-semibold mb-2">Recent Transcriptions</h2>
           <p className="text-gray-600">
-            {transcriptions.length > 0 
+            {transcriptions.length > 0
               ? `${transcriptions.length} transcription(s) in current session`
               : 'No transcriptions yet'}
           </p>
@@ -172,6 +196,7 @@ function AppContent() {
   const navigate = useNavigate();
   const [transcriptions, setTranscriptions] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [currentJob, setCurrentJob] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [backendStatus, setBackendStatus] = useState('checking');
   const [configuredProviders, setConfiguredProviders] = useState<any[]>([]);
@@ -212,6 +237,9 @@ function AppContent() {
   }, [settings.provider]);
 
   useEffect(() => {
+    // Initialize axios interceptors on mount
+    const cleanupInterceptors = setupAxiosInterceptors();
+
     // Check backend health on mount
     checkBackendHealth();
     loadConfiguredProviders();
@@ -219,7 +247,11 @@ function AppContent() {
       checkBackendHealth();
       loadConfiguredProviders();
     }, 30000); // Check every 30s
-    return () => clearInterval(interval);
+
+    return () => {
+      clearInterval(interval);
+      cleanupInterceptors();
+    };
   }, [checkBackendHealth, loadConfiguredProviders]);
 
   const handleAudioRecorded = async (audioBlob: Blob, fileName: string = 'recording.wav', selectedLanguage?: string) => {
@@ -254,19 +286,18 @@ function AppContent() {
       formData.append('max_speakers', String(settings.maxSpeakers));
       formData.append('include_timestamps', settings.includeTimestamps ? "1" : "0");
 
-      const result = await transcribeAudio(formData);
+      // Use async endpoint
+      const { job_id } = await transcribeAudioAsync(formData);
 
-      const newTranscription = {
-        ...result,
-        timestamp: new Date().toISOString(),
+      // Store job information
+      setCurrentJob({
+        id: job_id,
         fileName: fileName,
-        audioUrl: audioBlob instanceof Blob ? URL.createObjectURL(audioBlob) : null
-      };
+        audioBlob: audioBlob,
+        timestamp: new Date().toISOString()
+      });
 
-      setTranscriptions([newTranscription, ...transcriptions]);
-
-      // Navigate to results page after successful transcription
-      navigate('/results');
+      setIsLoading(false);
     } catch (err: any) {
       // Extract error message from response
       let errorMessage = 'Failed to transcribe audio';
@@ -285,106 +316,161 @@ function AppContent() {
         errorMessage = err.message;
       }
       setError(errorMessage);
-    } finally {
       setIsLoading(false);
+      setCurrentJob(null);
     }
+  };
+
+  const handleJobComplete = (result: any) => {
+    console.log('Job completed:', result);
+
+    // Create transcription object from result
+    const newTranscription = {
+      ...result,
+      timestamp: currentJob?.timestamp || new Date().toISOString(),
+      fileName: currentJob?.fileName || 'transcription.wav',
+      audioUrl: currentJob?.audioBlob instanceof Blob ? URL.createObjectURL(currentJob.audioBlob) : null
+    };
+
+    setTranscriptions([newTranscription, ...transcriptions]);
+    setCurrentJob(null);
+
+    // Navigate to results page after successful transcription
+    navigate('/results');
+  };
+
+  const handleJobError = (error: string) => {
+    console.error('Job failed:', error);
+    setError(error);
+    setCurrentJob(null);
   };
 
   return (
     <>
       <Routes>
+        {/* Public routes */}
+        <Route path="/login" element={<LoginForm onSuccess={() => navigate('/dashboard')} />} />
+        <Route path="/register" element={<RegisterForm onSuccess={() => navigate('/dashboard')} />} />
+
+        {/* Default redirect */}
         <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route 
-          path="/dashboard" 
+
+        {/* Protected routes */}
+        <Route
+          path="/dashboard"
           element={
-            <Dashboard 
-              transcriptions={transcriptions} 
-              backendStatus={backendStatus}
-              providers={providers}
-            />
-          } 
-        />
-        <Route 
-          path="/record" 
-          element={
-            <Box sx={{ p: 3 }}>
-              <AudioRecorder 
-                onAudioRecorded={handleAudioRecorded}
-                isLoading={isLoading}
-                settings={settings}
-              />
-            </Box>
-          } 
-        />
-        <Route 
-          path="/upload" 
-          element={
-            <Box sx={{ p: 3 }}>
-              <FileUpload 
-                onFilesUploaded={handleAudioRecorded}
-                isLoading={isLoading}
-                settings={settings}
-              />
-            </Box>
-          } 
-        />
-        <Route 
-          path="/results" 
-          element={
-            <Box sx={{ p: 3 }}>
-              <TranscriptionResults 
+            <ProtectedRoute>
+              <Dashboard
                 transcriptions={transcriptions}
+                backendStatus={backendStatus}
+                providers={providers}
               />
-            </Box>
-          } 
+            </ProtectedRoute>
+          }
         />
-        <Route 
-          path="/history" 
+        <Route
+          path="/record"
           element={
-            <Box sx={{ p: 3 }}>
-              <History 
-                onSelectTranscription={(t: any) => {
-                  setTranscriptions([t, ...transcriptions]);
-                  navigate('/results');
-                }}
-              />
-            </Box>
-          } 
+            <ProtectedRoute>
+              <Box sx={{ p: 3 }}>
+                <AudioRecorder
+                  onAudioRecorded={handleAudioRecorded}
+                  isLoading={isLoading}
+                  settings={settings}
+                  currentJob={currentJob}
+                  onJobComplete={handleJobComplete}
+                  onJobError={handleJobError}
+                />
+              </Box>
+            </ProtectedRoute>
+          }
         />
-        <Route 
-          path="/statistics" 
+        <Route
+          path="/upload"
           element={
-            <Box sx={{ p: 3 }}>
-              <Statistics />
-            </Box>
-          } 
+            <ProtectedRoute>
+              <Box sx={{ p: 3 }}>
+                <FileUpload
+                  onFilesUploaded={handleAudioRecorded}
+                  isLoading={isLoading}
+                  settings={settings}
+                  currentJob={currentJob}
+                  onJobComplete={handleJobComplete}
+                  onJobError={handleJobError}
+                />
+              </Box>
+            </ProtectedRoute>
+          }
         />
-        <Route 
-          path="/settings" 
+        <Route
+          path="/results"
           element={
-            <Box sx={{ p: 3 }}>
-              <Settings 
-                settings={settings}
-                onSettingsChange={setSettings}
-                onClose={() => navigate('/dashboard')}
-              />
-            </Box>
-          } 
+            <ProtectedRoute>
+              <Box sx={{ p: 3 }}>
+                <TranscriptionResults
+                  transcriptions={transcriptions}
+                />
+              </Box>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/history"
+          element={
+            <ProtectedRoute>
+              <Box sx={{ p: 3 }}>
+                <History
+                  onSelectTranscription={(t: any) => {
+                    setTranscriptions([t, ...transcriptions]);
+                    navigate('/results');
+                  }}
+                />
+              </Box>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/statistics"
+          element={
+            <ProtectedRoute>
+              <Box sx={{ p: 3 }}>
+                <Statistics />
+              </Box>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/settings"
+          element={
+            <ProtectedRoute>
+              <Box sx={{ p: 3 }}>
+                <Settings
+                  settings={settings}
+                  onSettingsChange={setSettings}
+                  onClose={() => navigate('/dashboard')}
+                />
+              </Box>
+            </ProtectedRoute>
+          }
         />
         <Route
           path="/api-keys"
           element={
-            <Box sx={{ p: 3 }}>
-              <APIKeysSettings />
-            </Box>
+            <ProtectedRoute>
+              <Box sx={{ p: 3 }}>
+                <APIKeysSettings />
+              </Box>
+            </ProtectedRoute>
           }
         />
         <Route
           path="/files"
           element={
-            <Box sx={{ p: 3 }}>
-              <FileManagement />
-            </Box>
+            <ProtectedRoute>
+              <Box sx={{ p: 3 }}>
+                <FileManagement />
+              </Box>
+            </ProtectedRoute>
           }
         />
       </Routes>

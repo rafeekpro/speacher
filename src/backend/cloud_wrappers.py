@@ -94,10 +94,37 @@ class AWSService:
             logger.error(f"Failed to start transcription job: {e}")
             raise Exception(f"Failed to start transcription job: {e}")
 
-    def wait_for_job_completion(self, job_name: str, timeout: int = 3600) -> Dict[str, Any]:
-        """Wait for transcription job to complete"""
+    def wait_for_job_completion(
+        self, job_name: str, job_manager=None, job_id: str = None, timeout: int = 3600
+    ) -> Dict[str, Any]:
+        """Wait for transcription job to complete with progress updates.
+
+        Args:
+            job_name: AWS Transcribe job name
+            job_manager: Optional TranscriptionJobManager instance for progress updates
+            job_id: Optional job ID for progress tracking
+            timeout: Maximum time to wait in seconds
+
+        Returns:
+            Completed transcription job dict
+
+        Raises:
+            Exception: If job fails or times out
+        """
+        from .transcription_jobs import JobStatus
+
         start_time = time.time()
         logger.info(f"Waiting for job {job_name} to complete (timeout: {timeout}s)")
+
+        # Initial progress update
+        if job_manager and job_id:
+            job_manager.update_progress(
+                job_id=job_id,
+                progress=20,
+                status=JobStatus.QUEUED,
+                current_step="Job queued for processing",
+                cost_estimate=0.0,
+            )
 
         while time.time() - start_time < timeout:
             try:
@@ -109,11 +136,48 @@ class AWSService:
 
                 if status == "COMPLETED":
                     logger.info(f"Job {job_name} completed successfully")
+
+                    # Update to downloading phase
+                    if job_manager and job_id:
+                        job_manager.update_progress(
+                            job_id=job_id,
+                            progress=90,
+                            status=JobStatus.DOWNLOADING,
+                            current_step="Downloading transcription results",
+                            cost_estimate=0.0,
+                        )
+
                     return response["TranscriptionJob"]
                 elif status == "FAILED":
                     failure_reason = job.get("FailureReason", "Unknown")
                     logger.error(f"Job {job_name} failed: {failure_reason}")
+
+                    if job_manager and job_id:
+                        job_manager.update_progress(
+                            job_id=job_id,
+                            progress=0,
+                            status=JobStatus.FAILED,
+                            current_step=f"Failed: {failure_reason}",
+                            cost_estimate=0.0,
+                        )
+
                     raise Exception(f"Transcription job failed: {failure_reason}")
+                elif status == "IN_PROGRESS":
+                    # Update progress during processing (20-90%)
+                    if job_manager and job_id:
+                        # Calculate progress based on elapsed time
+                        elapsed = time.time() - start_time
+                        # Assume average processing time of 5 minutes
+                        estimated_total = 300  # 5 minutes in seconds
+                        processing_progress = 20 + min(70, int((elapsed / estimated_total) * 70))
+
+                        job_manager.update_progress(
+                            job_id=job_id,
+                            progress=processing_progress,
+                            status=JobStatus.PROCESSING,
+                            current_step="Processing audio with AWS Transcribe",
+                            cost_estimate=0.0,
+                        )
 
                 time.sleep(10)
             except ClientError as e:
@@ -121,6 +185,16 @@ class AWSService:
                 time.sleep(10)
 
         logger.error(f"Job {job_name} timed out after {timeout}s")
+
+        if job_manager and job_id:
+            job_manager.update_progress(
+                job_id=job_id,
+                progress=0,
+                status=JobStatus.FAILED,
+                current_step="Job timed out",
+                cost_estimate=0.0,
+            )
+
         raise Exception("Transcription job timed out")
 
     def get_transcription_job_status(self, job_name: str) -> Dict[str, Any]:
@@ -159,22 +233,29 @@ class AWSService:
         except ClientError as e:
             raise Exception(f"Failed to delete from S3: {e}")
 
-    def list_s3_files(self, bucket_name: str) -> List[Dict[str, Any]]:
-        """List all files in S3 bucket.
+    def list_s3_files(self, bucket_name: str, prefix: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List files in S3 bucket with optional prefix filtering.
 
         Args:
             bucket_name: S3 bucket name
+            prefix: Optional S3 key prefix to filter results (e.g., "user-123/" for user-specific files)
 
         Returns:
             List of files with metadata: key, size, last_modified, etag
         """
         try:
-            logger.info(f"Listing files in S3 bucket: {bucket_name}")
+            logger.info(f"Listing files in S3 bucket: {bucket_name}" + (f" with prefix: {prefix}" if prefix else ""))
             files = []
 
             # Use pagination to handle buckets with many objects
             paginator = self.s3_client.get_paginator('list_objects_v2')
-            page_iterator = paginator.paginate(Bucket=bucket_name)
+
+            # Add prefix parameter if provided
+            pagination_params = {'Bucket': bucket_name}
+            if prefix:
+                pagination_params['Prefix'] = prefix
+
+            page_iterator = paginator.paginate(**pagination_params)
 
             for page in page_iterator:
                 if 'Contents' in page:

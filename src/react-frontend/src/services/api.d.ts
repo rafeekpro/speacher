@@ -1,54 +1,22 @@
-export interface TranscriptionResponse {
-  id?: string;
+export interface TranscribeAudioOptions {
+  file: Blob;
+  provider: string;
+  language: string;
+  enable_diarization: string;
+  max_speakers: string;
+  include_timestamps: string;
+}
+
+export interface TranscribeResult {
   text: string;
-  provider: string;
-  cost?: number;
-  processingTime?: number;
-  timestamp?: string;
-  language?: string;
-  diarization?: any;
-  segments?: Array<{
-    text: string;
-    start?: number;
-    end?: number;
-    speaker?: string;
-  }>;
+  segments?: any[];
+  [key: string]: any;
 }
 
-export interface HealthResponse {
-  status: 'healthy' | 'unhealthy';
-  error?: string;
+export interface AsyncTranscribeResponse {
+  job_id: string;
 }
 
-export interface StatisticsResponse {
-  totalTranscriptions: number;
-  totalCost: number;
-  averageProcessingTime: number;
-  providerBreakdown: {
-    [provider: string]: {
-      count: number;
-      totalCost: number;
-      averageProcessingTime: number;
-    };
-  };
-  recentActivity: Array<{
-    date: string;
-    count: number;
-    cost: number;
-  }>;
-}
-
-export interface ProviderInfo {
-  provider: string;
-  configured: boolean;
-  enabled: boolean;
-  source: 'env' | 'mongodb';
-}
-
-export function transcribeAudio(formData: FormData): Promise<TranscriptionResponse>;
-export function getTranscriptionHistory(limit?: number): Promise<TranscriptionResponse[]>;
-export function getTranscriptionById(id: string): Promise<TranscriptionResponse>;
-export function deleteTranscription(id: string): Promise<{ success: boolean }>;
-export function getStatistics(): Promise<StatisticsResponse>;
-export function checkHealth(): Promise<HealthResponse>;
-export function getProviders(): Promise<ProviderInfo[]>;
+export function transcribeAudio(formData: FormData): Promise<TranscribeResult>;
+export function transcribeAudioAsync(formData: FormData): Promise<AsyncTranscribeResponse>;
+export function checkHealth(): Promise<{ status: string }>;

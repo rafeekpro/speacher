@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 # Load environment variables from .env file
 from dotenv import find_dotenv, load_dotenv
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -37,17 +37,24 @@ from backend import cloud_wrappers
 # Use get_aws_service() function instead to pass credentials dynamically
 
 # Import API routers
-from api_v2 import auth_router, users_router, projects_router
+from backend.api_v2 import auth_router, users_router, projects_router
 
 # Import API keys manager (now using PostgreSQL)
-from api_keys import APIKeysManager
+from backend.api_keys import APIKeysManager
 
 # Import transcription database manager (PostgreSQL)
-from transcriptions_db import transcription_manager
+from backend.transcriptions_db import transcription_manager
+
+# Import transcription job manager for real-time progress tracking
+from backend.transcription_jobs import TranscriptionJobManager, JobStatus
+
+# Create global job manager instance
+job_manager = TranscriptionJobManager()
 
 # Import authentication dependencies
 from backend.auth import require_auth
 from backend.models import UserDB
+from src.backend.users_db import user_db  # For user database operations
 
 # Configuration from environment variables
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://speacher_user:SpeacherPro4_2024!@10.0.0.5:30432/speacher")
@@ -203,7 +210,7 @@ async def transcribe(
         if provider == CloudProvider.AWS.value:
             try:
                 result = await process_aws_transcription(
-                    temp_file_path, file.filename, language, enable_diarization, max_speakers
+                    temp_file_path, file.filename, language, enable_diarization, max_speakers, current_user
                 )
             except Exception as e:
                 logger.error(f"AWS Transcription Error: {e}")
@@ -284,8 +291,173 @@ async def transcribe(
             pass
 
 
+@app.post("/api/transcribe/async", response_model=Dict[str, str])
+async def transcribe_async(
+    file: UploadFile = File(...),
+    provider: str = Form("aws"),
+    language: str = Form("en-US"),
+    enable_diarization: bool = Form(True),
+    max_speakers: Optional[int] = Form(4),
+    current_user: UserDB = Depends(require_auth),
+):
+    """
+    Upload an audio file and start asynchronous transcription.
+
+    Returns a job_id immediately that can be used to track progress
+    via WebSocket endpoint /ws/transcribe/{job_id}.
+
+    The transcription runs in the background and clients can receive
+    real-time progress updates through WebSocket.
+    """
+    import asyncio
+
+    # Validate file type - same as regular transcribe
+    valid_types = [
+        "audio/wav",
+        "audio/mp3",
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/flac",
+        "audio/x-m4a",
+        "audio/x-wav",
+        "application/octet-stream",
+    ]
+    valid_extensions = [".wav", ".mp3", ".m4a", ".flac"]
+
+    file_extension = os.path.splitext(file.filename)[1].lower()
+
+    if file.content_type not in valid_types and file_extension not in valid_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid format. File type {file.content_type} or extension {file_extension} not supported. Supported: WAV, MP3, M4A, FLAC",
+        )
+
+    # Read file content
+    file_content = await file.read()
+    await file.seek(0)
+
+    # Check if file is empty
+    if len(file_content) == 0:
+        raise HTTPException(status_code=400, detail="File is empty")
+
+    # Check file size
+    if len(file_content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB")
+
+    # Validate audio file format
+    from backend.file_validator import validate_audio_file
+
+    is_test_env = os.getenv("TESTING", "false").lower() == "true"
+    is_valid, message, audio_format = validate_audio_file(
+        file_content, file.filename, max_size=MAX_FILE_SIZE, allow_test_files=is_test_env
+    )
+
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=message)
+
+    # Save uploaded file to temporary location
+    try:
+        suffix = os.path.splitext(file.filename)[1] or ".wav"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            temp_file_path = tmp.name
+            tmp.write(file_content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not save uploaded file: {e}")
+
+    # Detect audio duration for upfront cost estimation
+    audio_duration = None
+    initial_cost_estimate = 0.0
+    try:
+        from backend.audio_utils import get_audio_duration
+        audio_duration = get_audio_duration(temp_file_path)
+        initial_cost_estimate = calculate_cost(provider, audio_duration)
+        logger.info(f"Detected audio duration: {audio_duration:.2f}s, initial cost estimate: ${initial_cost_estimate:.4f}")
+    except Exception as e:
+        logger.warning(f"Could not detect audio duration for cost estimation: {e}")
+        # Continue without duration - will be calculated later
+        audio_duration = None
+        initial_cost_estimate = 0.0
+
+    # Create job in manager with duration and cost estimate
+    job_id = job_manager.create_job(
+        user_id=current_user.id,
+        filename=file.filename,
+        provider=provider,
+        duration=audio_duration,
+        initial_cost_estimate=initial_cost_estimate
+    )
+    async def run_transcription_task():
+        """Background task to process transcription and update progress."""
+        try:
+            # Update to uploading status
+            job_manager.update_progress(
+                job_id=job_id,
+                progress=10,
+                status=JobStatus.UPLOADING,
+                current_step="Uploading file to cloud storage",
+                cost_estimate=0.0
+            )
+
+            # Process transcription (AWS only for now)
+            if provider == CloudProvider.AWS.value:
+                # Use the modified wait_for_job_completion with job_manager
+                result = await process_aws_transcription_async(
+                    temp_file_path, file.filename, language, enable_diarization,
+                    max_speakers, current_user, job_id
+                )
+
+                # Update to completed status
+                job_manager.update_progress(
+                    job_id=job_id,
+                    progress=100,
+                    status=JobStatus.COMPLETED,
+                    current_step="Transcription completed",
+                    cost_estimate=result.get("cost_estimate", 0.0)
+                )
+
+                # Store in database
+                transcription_manager.save_transcription(
+                    filename=file.filename,
+                    provider=provider,
+                    language=language,
+                    transcript=result.get("transcript", ""),
+                    speakers=result.get("speakers", []),
+                    enable_diarization=enable_diarization,
+                    max_speakers=max_speakers,
+                    duration=result.get("duration", 0),
+                    cost_estimate=result.get("cost_estimate", 0.0),
+                    file_size=len(file_content),
+                    audio_file_id=None,
+                    user_id=current_user.id,
+                )
+            else:
+                raise Exception(f"Provider {provider} not yet supported for async transcription")
+
+        except Exception as e:
+            logger.error(f"Async transcription error for job {job_id}: {e}")
+            job_manager.update_progress(
+                job_id=job_id,
+                progress=0,
+                status=JobStatus.FAILED,
+                current_step=f"Error: {str(e)}",
+                cost_estimate=0.0
+            )
+        finally:
+            # Clean up temporary file
+            try:
+                os.remove(temp_file_path)
+            except OSError:
+                pass
+
+    # Start background task
+    asyncio.create_task(run_transcription_task())
+
+    # Return job_id immediately
+    return {"job_id": job_id, "status": "started"}
+
+
 async def process_aws_transcription(
-    file_path: str, filename: str, language: str, enable_diarization: bool, max_speakers: Optional[int]
+    file_path: str, filename: str, language: str, enable_diarization: bool, max_speakers: Optional[int], current_user: UserDB
 ) -> Dict[str, Any]:
     """Process transcription using AWS Transcribe"""
     # Get API keys from database
@@ -333,9 +505,10 @@ async def process_aws_transcription(
     if not s3_bucket_name:
         raise HTTPException(status_code=400, detail="AWS S3 bucket name is not configured")
 
-    # Upload to S3
+    # Upload to S3 with user_id prefix
     logger.info(f"Attempting to upload to S3 bucket: {s3_bucket_name}")
-    upload_result = service.upload_file_to_s3(file_path, s3_bucket_name, filename)
+    s3_key = f"{current_user.id}/{filename}"
+    upload_result = service.upload_file_to_s3(file_path, s3_bucket_name, s3_key)
     logger.debug(f"Upload result: {upload_result}")
 
     # upload_file_to_s3 returns S3 URI string: "s3://bucket-name/object-name"
@@ -416,6 +589,114 @@ async def process_aws_transcription(
 
     # NOTE: S3 files are now preserved for user management
     # Users can delete files via the /files endpoint
+
+    return result
+
+
+async def process_aws_transcription_async(
+    file_path: str, filename: str, language: str, enable_diarization: bool,
+    max_speakers: Optional[int], current_user: UserDB, job_id: str
+) -> Dict[str, Any]:
+    """Process transcription using AWS Transcribe with progress updates.
+
+    This is an async version that updates job progress during transcription.
+    """
+    # Get API keys from database
+    api_keys = api_keys_manager.get_api_keys("aws")
+    if not api_keys:
+        raise HTTPException(status_code=400, detail="AWS provider is not configured")
+
+    keys = api_keys.get("keys", {})
+
+    if not keys.get("access_key_id") or not keys.get("secret_access_key") or not keys.get("s3_bucket_name"):
+        missing = []
+        if not keys.get("access_key_id"):
+            missing.append("access_key_id")
+        if not keys.get("secret_access_key"):
+            missing.append("secret_access_key")
+        if not keys.get("s3_bucket_name"):
+            missing.append("s3_bucket_name")
+        raise HTTPException(status_code=400, detail=f"AWS missing required fields: {', '.join(missing)}")
+
+    # Initialize AWS service with credentials from database
+    from backend.cloud_wrappers import get_aws_service
+
+    service = get_aws_service(
+        access_key_id=keys["access_key_id"],
+        secret_access_key=keys["secret_access_key"],
+        region=keys.get("region", "us-east-1")
+    )
+
+    # Get S3 bucket name from configuration
+    s3_bucket_name = keys.get("s3_bucket_name")
+    if not s3_bucket_name:
+        raise HTTPException(status_code=400, detail="AWS S3 bucket name is not configured")
+
+    # Upload to S3 with user_id prefix
+    logger.info(f"Attempting to upload to S3 bucket: {s3_bucket_name}")
+    s3_key = f"{current_user.id}/{filename}"
+    upload_result = service.upload_file_to_s3(file_path, s3_bucket_name, s3_key)
+
+    if not upload_result.startswith("s3://"):
+        raise Exception("Failed to upload file to S3")
+
+    # Parse S3 URI to get bucket name
+    s3_uri_parts = upload_result.replace("s3://", "").split("/")
+    bucket_name = s3_uri_parts[0]
+    object_key = "/".join(s3_uri_parts[1:])
+
+    # Start transcription job
+    job_name = f"speacher-{uuid.uuid4()}"
+
+    # Build media file URI
+    media_file_uri = f"s3://{bucket_name}/{filename}"
+
+    # Determine media format from filename extension
+    media_format = os.path.splitext(filename)[1].lstrip('.')
+    if media_format == 'm4a':
+        media_format = 'mp4'  # AWS Transcribe doesn't support m4a
+
+    # Build settings for speaker diarization
+    settings = {}
+    if enable_diarization and max_speakers:
+        settings = {
+            "ShowSpeakerLabels": True,
+            "MaxSpeakerLabels": max_speakers
+        }
+
+    trans_resp = service.start_transcription_job(
+        job_name=job_name,
+        media_file_uri=media_file_uri,
+        media_format=media_format,
+        language_code=language,
+        settings=settings,
+    )
+    if not trans_resp:
+        raise Exception("Failed to start AWS transcription job")
+
+    # Wait for completion with job_manager for progress updates
+    job_info = service.wait_for_job_completion(
+        job_name=job_name,
+        job_manager=job_manager,
+        job_id=job_id
+    )
+
+    if not job_info:
+        status_info = service.get_transcription_job_status(job_name)
+        if status_info and status_info.get("TranscriptionJob"):
+            raise Exception(
+                f"No transcript found in job. Job status: {status_info.get('TranscriptionJobStatus')}"
+            )
+
+    transcript_uri = job_info["Transcript"]["TranscriptFileUri"]
+    logger.info(f"Downloading from URI: {transcript_uri}")
+    transcription_data = service.download_transcription_result(transcript_uri)
+
+    if transcription_data is None:
+        raise Exception("Failed to download transcription result from AWS")
+
+    # Process with speaker diarization
+    result = process_transcription_data(transcription_data, enable_diarization)
 
     return result
 
@@ -650,6 +931,64 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     await handle_websocket_streaming(websocket, client_id)
 
 
+@app.websocket("/ws/transcribe/{job_id}")
+async def transcribe_websocket(websocket: WebSocket, job_id: str):
+    """WebSocket endpoint for real-time transcription progress updates.
+
+    Clients connect to this endpoint with a job_id to receive
+    real-time progress updates as the transcription job progresses.
+    """
+    await websocket.accept()
+
+    try:
+        # Send initial status
+        job = job_manager.get_job_status(job_id)
+        if not job:
+            await websocket.send_json({"error": "Job not found"})
+            await websocket.close()
+            return
+
+        await websocket.send_json(job)
+
+        # Poll for updates every 500ms
+        import asyncio
+        last_update = job.get("updated_at", 0)
+
+        while True:
+            # Check if client disconnected
+            try:
+                await websocket.receive_text()
+            except Exception:
+                # Client disconnected
+                break
+
+            # Get current job status
+            current_job = job_manager.get_job_status(job_id)
+
+            if not current_job:
+                await websocket.send_json({"error": "Job not found"})
+                break
+
+            # Send update if status changed
+            if current_job.get("updated_at", 0) > last_update:
+                await websocket.send_json(current_job)
+                last_update = current_job.get("updated_at", 0)
+
+            # Check if job is complete or failed
+            if current_job["status"] in [JobStatus.COMPLETED, JobStatus.FAILED]:
+                # Send final update
+                await websocket.send_json(current_job)
+                break
+
+            await asyncio.sleep(0.5)  # Poll every 500ms
+
+    except Exception as e:
+        logger.error(f"WebSocket error for job {job_id}: {e}")
+        await websocket.send_json({"error": str(e)})
+    finally:
+        await websocket.close()
+
+
 @app.get("/api/stats")
 async def get_statistics():
     """Get usage statistics."""
@@ -657,8 +996,40 @@ async def get_statistics():
 
 
 @app.get("/api/files")
-async def list_s3_files():
-    """List all files in S3 bucket."""
+async def list_s3_files(
+    # Tymczasowo bez Depends(require_auth) - testujemy funkcjonalność
+    authorization: str = Header(None, alias="Authorization"),
+):
+    """List all files in S3 bucket for the authenticated user."""
+    # Debug log
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.warning(f"DEBUG: authorization = {authorization}")
+
+    if not authorization or authorization == "None":
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Pobierz token z nagłówka
+    token = authorization.replace("Bearer ", "")
+
+    # Pobierz user email z tokena
+    try:
+        from src.backend.auth import decode_token
+        payload = decode_token(token)
+        email = payload.get("sub")
+
+        if not email:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        from src.backend.users_db import user_db
+        user = await user_db.get_user_by_email(email)
+
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+
+        current_user = user
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
     try:
         # Get AWS keys from database
         api_keys = api_keys_manager.get_api_keys("aws")
@@ -679,23 +1050,28 @@ async def list_s3_files():
             region=keys.get("region", "us-east-1")
         )
 
-        # List files
-        files = service.list_s3_files(s3_bucket_name)
+        # List files with user_id prefix filter
+        user_prefix = f"{current_user.id}/"
+        files = service.list_s3_files(s3_bucket_name, prefix=user_prefix)
 
         # Get transcription count for each file
         files_with_counts = []
         for file_info in files:
-            filename = file_info['key']
+            # Remove user_id prefix from filename for display
+            filename = file_info['key'].replace(user_prefix, "", 1)
+
             # Count transcriptions for this file
             transcriptions = transcription_manager.get_transcription_history(
                 search=filename,
-                limit=1000
+                limit=1000,
+                user_id=current_user.id
             )
             # Filter for exact filename match
             exact_matches = [t for t in transcriptions if t.get('filename') == filename]
 
             files_with_counts.append({
                 **file_info,
+                'key': filename,  # Return filename without user prefix
                 'transcription_count': len(exact_matches)
             })
 
@@ -709,8 +1085,11 @@ async def list_s3_files():
 
 
 @app.delete("/api/files/{filename}")
-async def delete_s3_file(filename: str):
-    """Delete a file from S3 bucket."""
+async def delete_s3_file(
+    filename: str,
+    current_user: UserDB = Depends(require_auth),
+):
+    """Delete a file from S3 bucket (user must own the file)."""
     try:
         # Get AWS keys from database
         api_keys = api_keys_manager.get_api_keys("aws")
@@ -723,6 +1102,9 @@ async def delete_s3_file(filename: str):
         if not s3_bucket_name:
             raise HTTPException(status_code=400, detail="AWS S3 bucket name is not configured")
 
+        # Add user_id prefix to filename for S3
+        s3_key = f"{current_user.id}/{filename}"
+
         # Initialize AWS service
         from backend.cloud_wrappers import get_aws_service
         service = get_aws_service(
@@ -732,7 +1114,7 @@ async def delete_s3_file(filename: str):
         )
 
         # Delete file from S3
-        success = service.delete_file_from_s3(s3_bucket_name, filename)
+        success = service.delete_file_from_s3(s3_bucket_name, s3_key)
 
         if success:
             return {"message": f"File '{filename}' deleted successfully"}

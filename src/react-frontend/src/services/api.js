@@ -29,6 +29,33 @@ export const transcribeAudio = async (formData) => {
   }
 };
 
+export const transcribeAudioAsync = async (formData) => {
+  try {
+    const response = await axios.post(
+      `${API_BASE_URL}/api/transcribe/async`,
+      formData,
+      {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        },
+        timeout: 30000 // 30 seconds timeout for async endpoint
+      }
+    );
+
+    return response.data; // Returns { job_id: "..." }
+  } catch (error) {
+    if (error.code === 'ECONNABORTED') {
+      throw new Error('Request timed out. Please try again.');
+    } else if (error.response) {
+      throw new Error(error.response.data.detail || 'Server error');
+    } else if (error.request) {
+      throw new Error('No response from server. Please check if the backend is running.');
+    } else {
+      throw new Error('Failed to send request');
+    }
+  }
+};
+
 export const getTranscriptionHistory = async (limit = 50) => {
   try {
     const response = await axios.get(`${API_BASE_URL}/api/history`, {
