@@ -4,7 +4,28 @@ import { authService } from '../services/authService';
 
 interface CustomAxiosRequestConfig extends InternalAxiosRequestConfig {
   _retry?: boolean;
+  _skipAuthRefresh?: boolean;
 }
+
+// Flag to prevent infinite refresh attempts
+let isRefreshing = false;
+interface QueuedPromise {
+  resolve: (value?: any) => void;
+  reject: (reason?: any) => void;
+}
+let failedQueue: QueuedPromise[] = [];
+
+const processQueue = (error: any, token: string | null = null) => {
+  failedQueue.forEach((prom: QueuedPromise) => {
+    if (error) {
+      prom.reject(error);
+    } else {
+      prom.resolve(token);
+    }
+  });
+
+  failedQueue = [];
+};
 
 export const setupAxiosInterceptors = () => {
   // Request interceptor to add auth token
@@ -26,44 +47,81 @@ export const setupAxiosInterceptors = () => {
     (response) => response,
     async (error: AxiosError) => {
       const originalRequest = error.config as CustomAxiosRequestConfig;
-      
+
       if (!originalRequest) {
+        return Promise.reject(error);
+      }
+
+      // Skip auth refresh for the refresh endpoint itself to prevent infinite loops
+      if (originalRequest._skipAuthRefresh) {
         return Promise.reject(error);
       }
 
       // If we get a 401 and haven't already tried to refresh
       if (error.response?.status === 401 && !originalRequest._retry) {
         originalRequest._retry = true;
-        
+
         const refreshToken = tokenStorage.getRefreshToken();
-        
-        if (refreshToken) {
+
+        if (refreshToken && !isRefreshing) {
+          isRefreshing = true;
+
           try {
             // Try to refresh the token
             await authService.refreshToken();
-            
+
             // Get the new access token
             const newToken = tokenStorage.getAccessToken();
-            
+
+            // Reset the refreshing flag
+            isRefreshing = false;
+
+            // Process the queue with the new token
+            processQueue(null, newToken);
+
             // Update the Authorization header
             if (newToken) {
               originalRequest.headers.Authorization = `Bearer ${newToken}`;
             }
-            
+
             // Retry the original request
             return axios.request(originalRequest);
           } catch (refreshError) {
-            // Refresh failed, clear tokens and redirect to login
+            // Refresh failed, clear tokens and process queue with error
+            isRefreshing = false;
             tokenStorage.clearTokens();
-            // The app should handle this by checking isAuthenticated
+            processQueue(refreshError, null);
+
+            // Redirect to login page if in browser
+            if (typeof window !== 'undefined') {
+              window.location.href = '/login';
+            }
+
             return Promise.reject(error);
           }
+        } else if (isRefreshing) {
+          // If already refreshing, add this request to the queue
+          return new Promise((resolve, reject) => {
+            failedQueue.push({ resolve, reject });
+          }).then(token => {
+            if (token) {
+              originalRequest.headers.Authorization = `Bearer ${token}`;
+            }
+            return axios.request(originalRequest);
+          }).catch(err => {
+            return Promise.reject(err);
+          });
         } else {
-          // No refresh token available
+          // No refresh token available or already failed
           tokenStorage.clearTokens();
+
+          // Redirect to login if in browser
+          if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
+            window.location.href = '/login';
+          }
         }
       }
-      
+
       return Promise.reject(error);
     }
   );
