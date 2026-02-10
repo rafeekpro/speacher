@@ -24,7 +24,7 @@ spec:
         runAsUser: 0
       containers:
       - name: frontend
-        image: rafeekpro/speecher-frontend:v6-amd64
+        image: rafeekpro/speecher-frontend:v6-amd64-final
         imagePullPolicy: Always
         ports:
         - containerPort: 8080

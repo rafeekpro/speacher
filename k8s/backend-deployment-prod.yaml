@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
       - name: backend
-        image: rafeekpro/speecher-backend:v10-amd64
+        image: rafeekpro/speecher-backend:v10-amd64-fixed
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
