@@ -21,10 +21,10 @@ spec:
     spec:
       securityContext:
         fsGroup: 101
-        runAsUser: 101
+        runAsUser: 0
       containers:
       - name: frontend
-        image: rafeekpro/speecher-frontend:v5-amd64
+        image: rafeekpro/speecher-frontend:v6-amd64
         imagePullPolicy: Always
         ports:
         - containerPort: 8080
