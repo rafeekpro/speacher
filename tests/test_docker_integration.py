@@ -4,15 +4,15 @@ Docker integration tests for Speecher application.
 These tests verify the complete stack functionality when running in Docker.
 """
 
+import math
 import os
+import struct
+import tempfile
+import time
+import wave
+
 import pytest
 import requests
-import time
-import tempfile
-import wave
-import struct
-import math
-
 
 # Configuration from environment
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")

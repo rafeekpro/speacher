@@ -1,9 +1,10 @@
 """Tests for project management API endpoints"""
 
-import pytest
 import uuid
-from fastapi.testclient import TestClient
 from typing import Dict, Tuple
+
+import pytest
+from fastapi.testclient import TestClient
 
 
 class TestProjectManagementAPI:
@@ -15,7 +16,7 @@ class TestProjectManagementAPI:
         # Generate unique email for each test
         unique_id = str(uuid.uuid4())[:8]
         email = f"project_user_{unique_id}@example.com"
-        
+
         # Register user
         register_data = {"email": email, "password": "SecurePass123!", "full_name": "Project User"}
         reg_response = client.post("/api/auth/register", json=register_data)

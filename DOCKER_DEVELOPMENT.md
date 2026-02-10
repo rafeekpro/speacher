@@ -37,14 +37,14 @@ cp .env.example .env
 3. **Start development environment**:
 ```bash
 # Start all services with hot-reload
-docker-compose -f docker-compose.dev.yml up
+docker compose -f docker-compose.dev.yml up
 
 # Or run in background
-docker-compose -f docker-compose.dev.yml up -d
+docker compose -f docker-compose.dev.yml up -d
 
 # View logs
-docker-compose -f docker-compose.dev.yml logs -f backend
-docker-compose -f docker-compose.dev.yml logs -f frontend
+docker compose -f docker-compose.dev.yml logs -f backend
+docker compose -f docker-compose.dev.yml logs -f frontend
 ```
 
 4. **Access the application**:
@@ -106,26 +106,26 @@ Both backend and frontend support hot-reload in development:
 3. **Database changes**:
 ```bash
 # Run migrations
-docker-compose -f docker-compose.dev.yml exec backend alembic upgrade head
+docker compose -f docker-compose.dev.yml exec backend alembic upgrade head
 
 # Create new migration
-docker-compose -f docker-compose.dev.yml exec backend alembic revision --autogenerate -m "description"
+docker compose -f docker-compose.dev.yml exec backend alembic revision --autogenerate -m "description"
 ```
 
 ### Running Tests
 
 ```bash
 # Run all tests
-docker-compose -f docker-compose.dev.yml --profile test up test-runner
+docker compose -f docker-compose.dev.yml --profile test up test-runner
 
 # Run specific test file
-docker-compose -f docker-compose.dev.yml run --rm test-runner pytest tests/test_auth.py
+docker compose -f docker-compose.dev.yml run --rm test-runner pytest tests/test_auth.py
 
 # Run with coverage
-docker-compose -f docker-compose.dev.yml run --rm test-runner pytest --cov=src --cov-report=html
+docker compose -f docker-compose.dev.yml run --rm test-runner pytest --cov=src --cov-report=html
 
 # Run frontend tests
-docker-compose -f docker-compose.dev.yml exec frontend npm test
+docker compose -f docker-compose.dev.yml exec frontend npm test
 ```
 
 ### Debugging
@@ -133,10 +133,10 @@ docker-compose -f docker-compose.dev.yml exec frontend npm test
 1. **Backend debugging**:
 ```bash
 # Attach to running container
-docker-compose -f docker-compose.dev.yml exec backend bash
+docker compose -f docker-compose.dev.yml exec backend bash
 
 # View real-time logs
-docker-compose -f docker-compose.dev.yml logs -f backend
+docker compose -f docker-compose.dev.yml logs -f backend
 
 # Python debugger (pdb)
 # Add `import pdb; pdb.set_trace()` in your code
@@ -145,7 +145,7 @@ docker-compose -f docker-compose.dev.yml logs -f backend
 2. **Frontend debugging**:
 ```bash
 # Attach to running container
-docker-compose -f docker-compose.dev.yml exec frontend sh
+docker compose -f docker-compose.dev.yml exec frontend sh
 
 # Use browser DevTools for debugging
 # React DevTools extension recommended
@@ -154,13 +154,13 @@ docker-compose -f docker-compose.dev.yml exec frontend sh
 3. **Database debugging**:
 ```bash
 # PostgreSQL
-docker-compose -f docker-compose.dev.yml exec postgres psql -U speecher -d speecher_dev
+docker compose -f docker-compose.dev.yml exec postgres psql -U speecher -d speecher_dev
 
 # MongoDB
-docker-compose -f docker-compose.dev.yml exec mongodb mongosh -u admin -p speecher_admin_pass
+docker compose -f docker-compose.dev.yml exec mongodb mongosh -u admin -p speecher_admin_pass
 
 # Redis
-docker-compose -f docker-compose.dev.yml exec redis redis-cli
+docker compose -f docker-compose.dev.yml exec redis redis-cli
 ```
 
 ## Building Images
@@ -169,24 +169,24 @@ docker-compose -f docker-compose.dev.yml exec redis redis-cli
 
 ```bash
 # Build all services
-docker-compose -f docker-compose.dev.yml build
+docker compose -f docker-compose.dev.yml build
 
 # Build specific service
-docker-compose -f docker-compose.dev.yml build backend
-docker-compose -f docker-compose.dev.yml build frontend
+docker compose -f docker-compose.dev.yml build backend
+docker compose -f docker-compose.dev.yml build frontend
 ```
 
 ### Production Build
 
 ```bash
 # Build optimized production images
-docker-compose -f docker-compose.prod.yml build
+docker compose -f docker-compose.prod.yml build
 
 # Build with specific version tag
-VERSION=1.0.0 docker-compose -f docker-compose.prod.yml build
+VERSION=1.0.0 docker compose -f docker-compose.prod.yml build
 
 # Push to registry
-docker-compose -f docker-compose.prod.yml push
+docker compose -f docker-compose.prod.yml push
 ```
 
 ### Multi-stage Build Optimization
@@ -237,14 +237,14 @@ jobs:
       - uses: actions/checkout@v3
       
       - name: Build test image
-        run: docker-compose -f docker-compose.yml build test-runner
+        run: docker compose -f docker-compose.yml build test-runner
       
       - name: Run tests
-        run: docker-compose -f docker-compose.yml --profile test up --exit-code-from test-runner test-runner
+        run: docker compose -f docker-compose.yml --profile test up --exit-code-from test-runner test-runner
       
       - name: Build production images
         run: |
-          docker-compose -f docker-compose.prod.yml build
+          docker compose -f docker-compose.prod.yml build
           
       - name: Security scan
         run: |
@@ -295,45 +295,45 @@ kill -9 <PID>
 2. **Permission denied errors**:
 ```bash
 # Fix ownership of mounted volumes
-docker-compose -f docker-compose.dev.yml exec backend chown -R appuser:appuser /app
+docker compose -f docker-compose.dev.yml exec backend chown -R appuser:appuser /app
 ```
 
 3. **Hot-reload not working**:
 ```bash
 # Ensure CHOKIDAR_USEPOLLING is set for React
 # Check that volumes are mounted correctly
-docker-compose -f docker-compose.dev.yml exec frontend ls -la /app
+docker compose -f docker-compose.dev.yml exec frontend ls -la /app
 ```
 
 4. **Database connection errors**:
 ```bash
 # Ensure database is healthy
-docker-compose -f docker-compose.dev.yml ps
+docker compose -f docker-compose.dev.yml ps
 
 # Check database logs
-docker-compose -f docker-compose.dev.yml logs postgres
+docker compose -f docker-compose.dev.yml logs postgres
 ```
 
 5. **npm install failures**:
 ```bash
 # Clear npm cache
-docker-compose -f docker-compose.dev.yml exec frontend npm cache clean --force
+docker compose -f docker-compose.dev.yml exec frontend npm cache clean --force
 
 # Rebuild without cache
-docker-compose -f docker-compose.dev.yml build --no-cache frontend
+docker compose -f docker-compose.dev.yml build --no-cache frontend
 ```
 
 ### Cleaning Up
 
 ```bash
 # Stop all containers
-docker-compose -f docker-compose.dev.yml down
+docker compose -f docker-compose.dev.yml down
 
 # Remove volumes (WARNING: deletes data)
-docker-compose -f docker-compose.dev.yml down -v
+docker compose -f docker-compose.dev.yml down -v
 
 # Remove all images
-docker-compose -f docker-compose.dev.yml down --rmi all
+docker compose -f docker-compose.dev.yml down --rmi all
 
 # Clean Docker system
 docker system prune -a --volumes
@@ -392,13 +392,13 @@ Use profiles to selectively start services:
 
 ```bash
 # Start only core services
-docker-compose -f docker-compose.dev.yml up
+docker compose -f docker-compose.dev.yml up
 
 # Include nginx proxy
-docker-compose -f docker-compose.dev.yml --profile with-proxy up
+docker compose -f docker-compose.dev.yml --profile with-proxy up
 
 # Include development tools
-docker-compose -f docker-compose.dev.yml --profile tools up
+docker compose -f docker-compose.dev.yml --profile tools up
 ```
 
 ### Volume Performance Optimization
@@ -415,9 +415,9 @@ volumes:
 
 For issues or questions:
 1. Check the troubleshooting section above
-2. Review Docker logs: `docker-compose logs <service>`
+2. Review Docker logs: `docker compose logs <service>`
 3. Open an issue on GitHub with:
    - Docker version: `docker --version`
-   - Docker Compose version: `docker-compose --version`
+   - Docker Compose version: `docker compose --version`
    - Operating system
    - Error messages and logs

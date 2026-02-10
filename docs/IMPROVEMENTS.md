@@ -107,7 +107,7 @@ pytest tests/ -v --cov=src/backend
 
 Deploy with Docker:
 ```bash
-docker-compose up --build
+docker compose up --build
 ```
 
 Access:

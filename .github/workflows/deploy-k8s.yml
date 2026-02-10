@@ -1,0 +1,207 @@
+name: Deploy to Kubernetes
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+      image_tag:
+        description: 'Image tag to deploy'
+        required: false
+        default: 'latest'
+
+env:
+  DEPLOY_HOST: rla@10.0.0.5
+  IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
+
+jobs:
+  build:
+    name: Build Images
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate image metadata
+        id: meta
+        run: |
+          echo "tags=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
+          echo "date=$(date -u +%Y%m%d%H%M%S)" >> $GITHUB_OUTPUT
+
+      - name: Build backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/backend.Dockerfile
+          target: production
+          push: false
+          tags: speacher-backend:${{ env.IMAGE_TAG }}
+          outputs: type=docker,dest=/tmp/backend-image.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/react.Dockerfile
+          push: false
+          tags: speacher-frontend:${{ env.IMAGE_TAG }}
+          outputs: type=docker,dest=/tmp/frontend-image.tar
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Upload backend image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-image
+          path: /tmp/backend-image.tar
+          retention-days: 1
+
+      - name: Upload frontend image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-image
+          path: /tmp/frontend-image.tar
+          retention-days: 1
+
+  deploy:
+    name: Deploy to Kubernetes
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download backend image
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-image
+          path: /tmp
+
+      - name: Download frontend image
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-image
+          path: /tmp
+
+      - name: Setup SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H 10.0.0.5 >> ~/.ssh/known_hosts
+
+      - name: Transfer images to remote host
+        run: |
+          echo "Combining and compressing images..."
+          cat /tmp/backend-image.tar /tmp/frontend-image.tar | gzip > /tmp/speacher-images.tar.gz
+
+          echo "Transferring to remote host..."
+          scp /tmp/speacher-images.tar.gz ${{ env.DEPLOY_HOST }}:/tmp/
+
+          echo "Loading images on remote..."
+          ssh ${{ env.DEPLOY_HOST }} << 'EOF'
+            # Load images into containerd (k3s)
+            gunzip -c /tmp/speacher-images.tar.gz | sudo k3s ctr images import - || \
+            # Fallback: Load into Docker
+            gunzip -c /tmp/speacher-images.tar.gz | docker load
+
+            # Tag images
+            sudo k3s ctr images tag docker.io/library/speacher-backend:${{ env.IMAGE_TAG }} speacher-backend:${{ env.IMAGE_TAG }} 2>/dev/null || true
+            sudo k3s ctr images tag docker.io/library/speacher-frontend:${{ env.IMAGE_TAG }} speacher-frontend:${{ env.IMAGE_TAG }} 2>/dev/null || true
+
+            rm -f /tmp/speacher-images.tar.gz
+          EOF
+
+      - name: Deploy Kubernetes manifests
+        run: |
+          echo "Copying manifests..."
+          scp -r devops/k8s ${{ env.DEPLOY_HOST }}:/tmp/speacher-k8s
+
+          echo "Applying manifests..."
+          ssh ${{ env.DEPLOY_HOST }} << 'EOF'
+            cd /tmp/speacher-k8s
+
+            # Apply in order
+            kubectl apply -f namespace.yml
+            kubectl apply -f secrets.yml
+            kubectl apply -f mongodb.yml
+            kubectl apply -f backend.yml
+            kubectl apply -f frontend.yml
+
+            # Update image tags
+            kubectl set image deployment/backend backend=speacher-backend:${{ env.IMAGE_TAG }} -n speacher
+            kubectl set image deployment/frontend frontend=speacher-frontend:${{ env.IMAGE_TAG }} -n speacher
+
+            # Wait for rollout
+            kubectl rollout status deployment/backend -n speacher --timeout=180s
+            kubectl rollout status deployment/frontend -n speacher --timeout=180s
+
+            # Show status
+            echo "=== Deployment Status ==="
+            kubectl get pods -n speacher
+            kubectl get svc -n speacher
+
+            # Cleanup
+            rm -rf /tmp/speacher-k8s
+          EOF
+
+      - name: Verify deployment
+        run: |
+          ssh ${{ env.DEPLOY_HOST }} << 'EOF'
+            echo "Checking pod health..."
+            kubectl get pods -n speacher -o wide
+
+            echo ""
+            echo "Checking services..."
+            kubectl get svc -n speacher
+
+            # Simple health check
+            BACKEND_POD=$(kubectl get pods -n speacher -l app=backend -o jsonpath='{.items[0].metadata.name}')
+            if [ -n "$BACKEND_POD" ]; then
+              kubectl exec -n speacher $BACKEND_POD -- curl -s http://localhost:8000/health || echo "Health check skipped"
+            fi
+          EOF
+
+  notify:
+    name: Notify
+    needs: [build, deploy]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Deployment status
+        run: |
+          if [ "${{ needs.deploy.result }}" == "success" ]; then
+            echo "✅ Deployment successful!"
+            echo "Backend: http://10.0.0.5:8000"
+            echo "Frontend: http://10.0.0.5:3000"
+          else
+            echo "❌ Deployment failed!"
+            exit 1
+          fi

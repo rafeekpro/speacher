@@ -1,0 +1,295 @@
+name: Visual Regression Tests
+
+on:
+  push:
+    branches: [main, develop, 'feature/*']
+    paths:
+      - 'src/react-frontend/**'
+      - 'frontend/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/visual-tests.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'src/react-frontend/**'
+      - 'frontend/**'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+    inputs:
+      update_snapshots:
+        description: 'Update baseline snapshots'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: visual-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Visual testing environment variables
+  FRONTEND_DIR: './src/react-frontend'
+  # Kubernetes namespace for test services (for future hybrid strategy)
+  KUBE_NAMESPACE: 'github-runner'
+  # Test server configuration - let Playwright handle dynamic port allocation
+  CI: 'true'
+  PLAYWRIGHT_BROWSERS_PATH: 0
+
+jobs:
+  visual-tests:
+    name: Visual Regression Testing
+    runs-on: [self-hosted, playwright, e2e]
+    timeout-minutes: 30
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium]
+        # Only chromium is available on GitHub runners
+        # firefox and webkit require full browser installations
+        
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+      checks: write
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔧 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: 📦 Install dependencies
+        working-directory: ./src/react-frontend
+        run: |
+          npm ci
+          # Install Playwright browsers without sudo (already installed in runner)
+          npx playwright install ${{ matrix.browser }} || echo "Browser may be pre-installed"
+
+      - name: 📸 Download baseline screenshots
+        uses: actions/download-artifact@v4
+        with:
+          name: visual-snapshots-${{ matrix.browser }}
+          path: ./src/react-frontend/tests/visual/__screenshots__
+        continue-on-error: true
+
+      - name: 🚀 Prepare Test Environment
+        working-directory: ${{ env.FRONTEND_DIR }}
+        run: |
+          echo "🚀 Preparing environment for visual testing..."
+          echo "   Playwright will manage the test server automatically"
+          echo "   Using improved configuration with dynamic port allocation"
+          echo "   Environment: CI=$CI, GitHub Actions=$GITHUB_ACTIONS"
+          
+          # Pre-build the application for faster test startup
+          echo "🏗️ Pre-building frontend application..."
+          npm run build || echo "⚠️ Build failed, Playwright will use dev server"
+
+      - name: 🎭 Run visual tests
+        id: visual-tests
+        working-directory: ./src/react-frontend
+        run: |
+          if [ "${{ github.event.inputs.update_snapshots }}" == "true" ]; then
+            echo "📸 Updating baseline snapshots..."
+            npx playwright test tests/visual/visual.spec.ts \
+              --project=${{ matrix.browser }} \
+              --update-snapshots \
+              --reporter=list,json,html
+          else
+            echo "🔍 Running visual regression tests..."
+            npx playwright test tests/visual/visual.spec.ts \
+              --project=${{ matrix.browser }} \
+              --reporter=list,json,html
+          fi
+        env:
+          CI: true
+          GITHUB_ACTIONS: true
+          PLAYWRIGHT_BROWSERS_PATH: 0
+
+      - name: 📊 Generate visual diff report
+        if: failure() && steps.visual-tests.outcome == 'failure'
+        working-directory: ./src/react-frontend
+        run: |
+          echo "## 📸 Visual Regression Detected" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Browser: **${{ matrix.browser }}**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Failed Tests:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          npx playwright show-report --host=0.0.0.0 --port=9323 &
+          sleep 5
+          curl -s http://localhost:9323 || echo "Report server not accessible"
+          pkill -f "playwright show-report" || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📎 Check the artifacts for detailed visual diff report" >> $GITHUB_STEP_SUMMARY
+
+      - name: 💾 Upload baseline snapshots
+        if: success() || github.event.inputs.update_snapshots == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-snapshots-${{ matrix.browser }}
+          path: ./src/react-frontend/tests/visual/__screenshots__
+          retention-days: 30
+
+      - name: 📊 Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-test-results-${{ matrix.browser }}
+          path: |
+            ./src/react-frontend/playwright-report/
+            ./src/react-frontend/test-results/
+          retention-days: 7
+
+      - name: 🔍 Upload visual diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: visual-diffs-${{ matrix.browser }}
+          path: |
+            ./src/react-frontend/tests/visual/__screenshots__/**/*-diff.png
+            ./src/react-frontend/tests/visual/__screenshots__/**/*-actual.png
+          retention-days: 7
+
+      - name: 🧹 Cleanup Test Environment
+        if: always()
+        run: |
+          echo "🧹 Cleaning up visual test environment..."
+          
+          # Kill any remaining Playwright processes
+          pkill -f "playwright" || true
+          pkill -f "npm" || true
+          pkill -f "node" || true
+          
+          echo "✅ Visual test cleanup completed"
+
+      - name: 💬 Comment on PR with results
+        if: github.event_name == 'pull_request' && (success() || failure())
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const testResults = {
+              browser: '${{ matrix.browser }}',
+              status: '${{ steps.visual-tests.outcome }}',
+              timestamp: new Date().toISOString()
+            };
+            
+            let comment = `## 🎭 Visual Test Results - ${{ matrix.browser }}\n\n`;
+            
+            if (testResults.status === 'success') {
+              comment += `✅ **All visual tests passed!**\n\n`;
+              comment += `Browser: ${{ matrix.browser }}\n`;
+              comment += `No visual regressions detected.\n`;
+            } else {
+              comment += `❌ **Visual regressions detected!**\n\n`;
+              comment += `Browser: ${{ matrix.browser }}\n\n`;
+              comment += `### Action Required:\n`;
+              comment += `1. Review the visual differences in the artifacts\n`;
+              comment += `2. If changes are intentional, update baselines\n`;
+              comment += `3. If not intentional, fix the visual issues\n\n`;
+              comment += `[View detailed report in artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})\n`;
+            }
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+
+      - name: 🚦 Set check status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ steps.visual-tests.outcome }}' === 'success' ? 'success' : 'failure';
+            const conclusion = status === 'success' ? 'success' : 'failure';
+            
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'Visual Tests - ${{ matrix.browser }}',
+              head_sha: context.sha,
+              status: 'completed',
+              conclusion: conclusion,
+              output: {
+                title: `Visual Tests - ${{ matrix.browser }}`,
+                summary: status === 'success' 
+                  ? `✅ All visual tests passed for ${{ matrix.browser }}`
+                  : `❌ Visual regressions detected in ${{ matrix.browser }}`,
+              }
+            });
+
+  visual-test-summary:
+    name: Visual Test Summary
+    runs-on: [self-hosted, playwright, e2e]
+    needs: visual-tests
+    if: always()
+    
+    steps:
+      - name: 📊 Generate summary
+        run: |
+          echo "# 🎭 Visual Testing Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Test Results:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Browser | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Chromium | ${{ needs.visual-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.visual-tests.result }}" == "success" ]; then
+            echo "✅ **All visual tests passed successfully!**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Visual regressions detected. Please review the artifacts.**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: 🚫 Fail if visual tests failed
+        if: needs.visual-tests.result == 'failure'
+        run: |
+          echo "❌ Visual tests failed. PR cannot be merged."
+          exit 1
+
+  update-baselines:
+    name: Update Baseline Snapshots
+    runs-on: [self-hosted, playwright, e2e]
+    if: github.event.inputs.update_snapshots == 'true'
+    needs: visual-tests
+    
+    permissions:
+      contents: write
+      
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📸 Download updated snapshots
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: 📦 Organize snapshots
+        run: |
+          mkdir -p ./src/react-frontend/tests/visual/__screenshots__
+          cp -r ./artifacts/visual-snapshots-*/* ./src/react-frontend/tests/visual/__screenshots__/ || true
+
+      - name: 💾 Commit updated baselines
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add ./src/react-frontend/tests/visual/__screenshots__
+          git commit -m "🎭 Update visual test baseline snapshots [skip ci]" || echo "No changes to commit"
+          git push || echo "No changes to push"

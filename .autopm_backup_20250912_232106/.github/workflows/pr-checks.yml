@@ -1,0 +1,774 @@
+name: Pull Request Checks
+
+on:
+  pull_request:
+    types: [ opened, synchronize, reopened, ready_for_review ]
+    branches: [ main, develop ]
+
+env:
+  PYTHON_VERSION: '3.11'
+
+# Permissions needed for the workflow
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+  issues: read
+
+# Cancel previous runs for the same PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: [self-hosted, linux, x64, kubernetes]
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      tests: ${{ steps.filter.outputs.tests }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # Fetch all history for all branches and tags
+        fetch-depth: 0
+    
+    - name: Detect changed files
+      uses: dorny/paths-filter@v2
+      id: filter
+      continue-on-error: true
+      with:
+        # Use local git history instead of GitHub API to avoid timeouts
+        base: ${{ github.event.pull_request.base.ref }}
+        filters: |
+          backend:
+            - 'src/backend/**'
+            - 'src/speecher/**'
+            - 'Dockerfile'
+            - 'requirements/*.txt'
+            - 'pyproject.toml'
+          frontend:
+            - 'src/react-frontend/**'
+            - 'docker/react.Dockerfile'
+          tests:
+            - 'tests/**'
+            - 'run_api_tests.sh'
+            - 'pytest.ini'
+
+  run-tests:
+    name: 🧪 Run All Tests
+    runs-on: [self-hosted, linux, x64, kubernetes]
+    needs: changes
+    # Run tests if backend/tests changed OR if path detection failed (fail-safe)
+    if: |
+      always() && 
+      (needs.changes.outputs.backend == 'true' || 
+       needs.changes.outputs.tests == 'true' || 
+       needs.changes.result == 'failure')
+    
+    # Temporarily disabled - replace with kubectl run equivalent
+    # services:
+    #   mongodb:
+    #     image: mongo:6.0
+    #     ports:
+    #       - 27017:27017
+    #     options: >-
+    #       --health-cmd "mongosh --eval 'db.adminCommand({ping: 1})'"
+    #       --health-interval 10s
+    #       --health-timeout 5s
+    #       --health-retries 5
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+    
+    - name: 🗃️ Setup MongoDB with kubectl
+      run: |
+        echo "Setting up MongoDB using kubectl in github-runner namespace..."
+        kubectl run mongodb-pr-${{ github.event.pull_request.number || github.run_id }} \
+          --image=mongo:6.0 --port=27017 \
+          --namespace=github-runner \
+          --env="MONGO_INITDB_ROOT_USERNAME=root" \
+          --env="MONGO_INITDB_ROOT_PASSWORD=example" \
+          --labels="test-run=${{ github.event.pull_request.number || github.run_id }}" || true
+        kubectl wait --for=condition=ready \
+          pod/mongodb-pr-${{ github.event.pull_request.number || github.run_id }} \
+          --timeout=60s --namespace=github-runner || echo "MongoDB pod not ready, continuing with tests"
+        kubectl port-forward \
+          pod/mongodb-pr-${{ github.event.pull_request.number || github.run_id }} 27017:27017 \
+          --namespace=github-runner &
+        sleep 10
+        echo "MongoDB setup completed"
+    
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: 📦 Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements*.txt', 'pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: 📚 Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements/base.txt
+        pip install -r requirements/test.txt
+    
+    - name: 🔬 Run all tests with coverage
+      env:
+        MONGODB_URI: mongodb://localhost:27017
+        S3_BUCKET_NAME: test-bucket
+        AZURE_STORAGE_ACCOUNT: test-account
+        GCP_PROJECT_ID: test-project
+      run: |
+        pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing --cov-fail-under=70
+    
+    - name: 🧹 Cleanup MongoDB
+      if: always()
+      run: |
+        echo "Cleaning up MongoDB resources..."
+        kubectl delete pod mongodb-pr-${{ github.event.pull_request.number || github.run_id }} \
+          --namespace=github-runner --ignore-not-found=true
+        pkill -f "kubectl port-forward" || true
+    
+    
+    - name: 📊 Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: test-results/
+    
+    - name: 📈 Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        fail_ci_if_error: false
+    
+    # Comment step disabled - requires pull-requests: write permission
+    # - name: 💬 Comment test results on PR
+    #   if: github.event_name == 'pull_request'
+    #   uses: actions/github-script@v6
+    #   with:
+    #     script: |
+    #       const fs = require('fs');
+    #       const coverage = fs.existsSync('./coverage.xml') ? '✅ Coverage report generated' : '⚠️ No coverage report';
+    #       
+    #       const comment = `## 🧪 Test Results
+    #       
+    #       | Test Suite | Status |
+    #       |------------|--------|
+    #       | Unit Tests | ✅ Passed |
+    #       | Integration Tests | ✅ Passed |
+    #       | Coverage | ${coverage} |
+    #       
+    #       All tests completed successfully! `;
+    #       
+    #       github.rest.issues.createComment({
+    #         issue_number: context.issue.number,
+    #         owner: context.repo.owner,
+    #         repo: context.repo.repo,
+    #         body: comment
+    #       });
+
+  code-quality:
+    name: 🎨 Code Quality
+    runs-on: [self-hosted, linux, x64, kubernetes]
+    needs: changes
+    # Run if backend/frontend changed OR if path detection failed
+    if: |
+      always() &&
+      (needs.changes.outputs.backend == 'true' || 
+       needs.changes.outputs.frontend == 'true' ||
+       needs.changes.result == 'failure')
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+    
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: 📚 Install linting tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 black isort mypy pylint
+    
+    - name: 🖤 Check Black formatting
+      id: black
+      run: |
+        black --check src/ tests/ || echo "::warning::Code needs formatting with Black"
+    
+    - name: 📦 Check import sorting
+      id: isort
+      run: |
+        isort --check-only src/ tests/ || echo "::warning::Imports need sorting with isort"
+    
+    - name: 📏 Run Flake8
+      id: flake8
+      run: |
+        flake8 src/ tests/ --max-line-length=120 --ignore=E203,W503 --format=github
+      continue-on-error: true
+    
+    - name: 🔍 Run Pylint
+      id: pylint
+      run: |
+        pylint src/ --exit-zero --output-format=parseable
+      continue-on-error: true
+
+  security-scan:
+    name: 🔒 Security Scan
+    runs-on: [self-hosted, linux, x64, kubernetes]
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+    
+    - name: 🐍 Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: 🔐 Run Bandit security scan
+      run: |
+        pip install bandit
+        bandit -r src/ -f json -o bandit-report.json || true
+    
+    - name: 🛡️ Run Safety check
+      run: |
+        pip install safety
+        pip install -r requirements/test.txt
+        safety check --json || true
+    
+    - name: 📤 Upload security reports
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-reports
+        path: |
+          bandit-report.json
+
+  container-build:
+    name: 🐳 Container Build Test (Kaniko)
+    runs-on: [self-hosted, linux, x64, kubernetes]
+    needs: changes
+    # Run if backend/frontend changed OR if path detection failed
+    if: |
+      always() &&
+      (needs.changes.outputs.backend == 'true' || 
+       needs.changes.outputs.frontend == 'true' ||
+       needs.changes.result == 'failure')
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+    
+    - name: 🔧 Verify Kubernetes build environment
+      run: |
+        echo "Verifying Kubernetes cluster for container builds..."
+        kubectl cluster-info
+        # kubectl get nodes requires cluster permissions - skipping
+        kubectl get namespaces || echo "Could not list namespaces"
+        echo "✅ Kubernetes environment ready for builds"
+    
+    - name: 🏗️ Build Backend Container image with Kaniko
+      run: |
+        echo "🏗️ Building backend image with Kaniko for PR ${{ github.event.pull_request.number }}..."
+        
+        # Clean up any existing job from previous runs
+        echo "🧹 Cleaning up any existing backend build job..."
+        kubectl delete job backend-build-pr-${{ github.event.pull_request.number }} --namespace=github-runner --ignore-not-found=true
+        
+        # No need for ConfigMap - using Git clone in init container
+        
+        # Backend build job with optimized Kaniko configuration
+        cat <<EOF | kubectl apply -f -
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: backend-build-pr-${{ github.event.pull_request.number }}
+          namespace: github-runner
+          labels:
+            app: kaniko-build
+            build-type: container
+            pr-number: "${{ github.event.pull_request.number }}"
+        spec:
+          backoffLimit: 2
+          activeDeadlineSeconds: 900
+          ttlSecondsAfterFinished: 3600  # Auto-cleanup after 1 hour
+          template:
+            metadata:
+              labels:
+                app: kaniko-build
+                pr-number: "${{ github.event.pull_request.number }}"
+            spec:
+              restartPolicy: Never
+              serviceAccountName: github-runner  # Use dedicated ServiceAccount
+              initContainers:
+              - name: prepare-build-context
+                image: alpine/git:latest
+                command: ['sh', '-c']
+                args:
+                  - |
+                    echo "Cloning repository..."
+                    git clone --depth 1 https://github.com/${{ github.repository }}.git /workspace/context
+                    cd /workspace/context
+                    git checkout ${{ github.sha }}
+                    
+                    echo "Setting permissions for user 1000..."
+                    chown -R 1000:1000 /workspace
+                    
+                    echo "Build context ready"
+                volumeMounts:
+                - name: workspace
+                  mountPath: /workspace
+                securityContext:
+                  runAsUser: 0  # Git needs root to clone and write files
+                  runAsNonRoot: false
+                  allowPrivilegeEscalation: false
+              containers:
+              - name: kaniko
+                image: gcr.io/kaniko-project/executor:latest
+                args:
+                - --dockerfile=/workspace/context/Dockerfile
+                - --context=dir:///workspace/context
+                - --destination=speecher-backend:pr-${{ github.event.pull_request.number }}
+                - --no-push
+                - --cache=true
+                - --cache-ttl=24h
+                - --verbosity=info  # Reduced verbosity for cleaner logs
+                volumeMounts:
+                - name: workspace
+                  mountPath: /workspace
+                resources:
+                  requests:
+                    memory: "1Gi"
+                    cpu: "500m"
+                  limits:
+                    memory: "2Gi"
+                    cpu: "1000m"
+                securityContext:
+                  runAsUser: 1000
+                  runAsNonRoot: true
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                    - ALL
+              volumes:
+              - name: workspace
+                emptyDir: {}
+        EOF
+        
+        echo "⏳ Waiting for backend build to complete..."
+        kubectl wait --for=condition=complete job/backend-build-pr-${{ github.event.pull_request.number }} \
+          --timeout=900s \
+          --namespace=github-runner || {
+          echo "❌ Backend build failed"
+          kubectl logs job/backend-build-pr-${{ github.event.pull_request.number }} --namespace=github-runner --tail=50
+          kubectl delete job backend-build-pr-${{ github.event.pull_request.number }} --namespace=github-runner --ignore-not-found=true
+          exit 1
+        }
+        
+        echo "✅ Backend image built successfully with Kaniko"
+        
+        # Cleanup backend job
+        kubectl delete job backend-build-pr-${{ github.event.pull_request.number }} --namespace=github-runner --ignore-not-found=true
+    
+    - name: 🔍 Debug Backend Kaniko Build Failure
+      if: failure()
+      run: |
+        echo "🔍 ===================================="
+        echo "🔍 KANIKO BUILD FAILURE DIAGNOSTICS"
+        echo "🔍 ===================================="
+        
+        # Configuration for this workflow
+        JOB_NAME="backend-build-pr-${{ github.event.pull_request.number }}"
+        NAMESPACE="github-runner"
+        BUILD_TYPE="backend"
+        
+        echo "🔍 Job Name: $JOB_NAME"
+        echo "🔍 Namespace: $NAMESPACE"
+        echo "🔍 Build Type: $BUILD_TYPE"
+        echo ""
+        
+        # Step 1: Find the Kaniko pod using job selectors
+        echo "📋 Step 1: Finding Kaniko pod..."
+        echo "==============================="
+        
+        KANIKO_POD=""
+        
+        # Method 1: Find by job-name label
+        if [[ -z "$KANIKO_POD" ]]; then
+          KANIKO_POD=$(kubectl get pods -n $NAMESPACE \
+            -l job-name=$JOB_NAME \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          [[ -n "$KANIKO_POD" ]] && echo "✅ Found pod by job-name label: $KANIKO_POD"
+        fi
+        
+        # Method 2: Find by app=kaniko-build label
+        if [[ -z "$KANIKO_POD" ]]; then
+          KANIKO_POD=$(kubectl get pods -n $NAMESPACE \
+            -l app=kaniko-build,pr-number="${{ github.event.pull_request.number }}" \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          [[ -n "$KANIKO_POD" ]] && echo "✅ Found pod by app label: $KANIKO_POD"
+        fi
+        
+        if [[ -z "$KANIKO_POD" ]]; then
+          echo "❌ No Kaniko pod found!"
+          echo "📋 Available pods in namespace $NAMESPACE:"
+          kubectl get pods -n $NAMESPACE --sort-by=.metadata.creationTimestamp
+          echo ""
+          echo "📋 Available jobs in namespace $NAMESPACE:"
+          kubectl get jobs -n $NAMESPACE --sort-by=.metadata.creationTimestamp
+          KANIKO_POD_EXISTS=false
+        else
+          echo "✅ Using Kaniko pod: $KANIKO_POD"
+          KANIKO_POD_EXISTS=true
+        fi
+        echo ""
+        
+        # Step 2: Job Status and Events
+        echo "📋 Step 2: Job Status and Events"
+        echo "================================"
+        
+        echo "🔍 Job description:"
+        kubectl describe job $JOB_NAME -n $NAMESPACE 2>/dev/null || {
+          echo "❌ Job $JOB_NAME not found"
+          echo "📋 Available jobs:"
+          kubectl get jobs -n $NAMESPACE -o wide
+        }
+        echo ""
+        
+        echo "🔍 Job events:"
+        kubectl get events -n $NAMESPACE \
+          --field-selector involvedObject.name=$JOB_NAME \
+          --sort-by='.lastTimestamp' 2>/dev/null || echo "❌ No job events found"
+        echo ""
+        
+        # Step 3: Pod Diagnostics
+        if [[ "$KANIKO_POD_EXISTS" == "true" ]]; then
+          echo "📋 Step 3: Pod Diagnostics"
+          echo "=========================="
+          
+          echo "🔍 Pod description:"
+          kubectl describe pod $KANIKO_POD -n $NAMESPACE 2>/dev/null || echo "❌ Pod description failed"
+          echo ""
+          
+          echo "🔍 Pod events:"
+          kubectl get events -n $NAMESPACE \
+            --field-selector involvedObject.name=$KANIKO_POD \
+            --sort-by='.lastTimestamp' 2>/dev/null || echo "❌ No pod events found"
+          echo ""
+        fi
+        
+        # Step 4: Container Logs
+        echo "📋 Step 4: Container Logs"
+        echo "=========================="
+        
+        if [[ "$KANIKO_POD_EXISTS" == "true" ]]; then
+          echo "🔍 Init container logs (prepare-build-context):"
+          echo "------------------------------------------------"
+          kubectl logs $KANIKO_POD -n $NAMESPACE -c prepare-build-context --tail=50 2>/dev/null || {
+            echo "❌ No init container logs available"
+          }
+          echo ""
+          
+          echo "🔍 Kaniko container logs:"
+          echo "-------------------------"
+          kubectl logs $KANIKO_POD -n $NAMESPACE -c kaniko --tail=100 2>/dev/null || {
+            echo "❌ No Kaniko container logs available"
+            kubectl logs $KANIKO_POD -n $NAMESPACE --all-containers=true --tail=50 2>/dev/null || \
+              echo "❌ Could not retrieve any container logs"
+          }
+        else
+          echo "⚠️ No pod found - checking job logs directly"
+          kubectl logs job/$JOB_NAME -n $NAMESPACE --tail=100 2>/dev/null || echo "❌ No job logs available"
+        fi
+        echo ""
+        
+        # Step 5: Resource Status
+        echo "📋 Step 5: Resource Status"
+        echo "=========================="
+        
+        echo "🔍 Recent resources in namespace:"
+        kubectl get pods,jobs,configmaps -n $NAMESPACE --sort-by=.metadata.creationTimestamp | tail -10
+        echo ""
+        
+        echo "🔍 ============================="
+        echo "🔍 END KANIKO FAILURE ANALYSIS"
+        echo "🔍 ==============================="
+    
+    - name: 🏗️ Build Frontend Container image with Kaniko
+      run: |
+        echo "🏗️ Building frontend image with Kaniko..."
+        
+        if [ -f "docker/react.Dockerfile" ]; then
+          # Clean up any existing job from previous runs
+          echo "🧹 Cleaning up any existing frontend build job..."
+          kubectl delete job frontend-build-pr-${{ github.event.pull_request.number }} --namespace=github-runner --ignore-not-found=true
+          
+          # No need for ConfigMap - using Git clone in init container
+          
+          # Frontend build job with optimized Kaniko configuration
+          cat <<EOF | kubectl apply -f -
+        apiVersion: batch/v1
+        kind: Job
+        metadata:
+          name: frontend-build-pr-${{ github.event.pull_request.number }}
+          namespace: github-runner
+          labels:
+            app: kaniko-build
+            build-type: container
+            pr-number: "${{ github.event.pull_request.number }}"
+        spec:
+          backoffLimit: 2
+          activeDeadlineSeconds: 900
+          ttlSecondsAfterFinished: 3600  # Auto-cleanup after 1 hour
+          template:
+            metadata:
+              labels:
+                app: kaniko-build
+                pr-number: "${{ github.event.pull_request.number }}"
+            spec:
+              restartPolicy: Never
+              serviceAccountName: github-runner  # Use dedicated ServiceAccount
+              initContainers:
+              - name: prepare-build-context
+                image: alpine/git:latest
+                command: ['sh', '-c']
+                args:
+                  - |
+                    echo "Cloning repository..."
+                    git clone --depth 1 https://github.com/${{ github.repository }}.git /workspace/context
+                    cd /workspace/context
+                    git checkout ${{ github.sha }}
+                    
+                    echo "Setting permissions for user 1000..."
+                    chown -R 1000:1000 /workspace
+                    
+                    echo "Build context ready"
+                volumeMounts:
+                - name: workspace
+                  mountPath: /workspace
+                securityContext:
+                  runAsUser: 0  # Git needs root to clone and write files
+                  runAsNonRoot: false
+                  allowPrivilegeEscalation: false
+              containers:
+              - name: kaniko
+                image: gcr.io/kaniko-project/executor:latest
+                args:
+                - --dockerfile=/workspace/context/docker/react.Dockerfile
+                - --context=dir:///workspace/context
+                - --destination=speecher-frontend:pr-${{ github.event.pull_request.number }}
+                - --no-push
+                - --cache=true
+                - --cache-ttl=24h
+                - --verbosity=info  # Reduced verbosity for cleaner logs
+                volumeMounts:
+                - name: workspace
+                  mountPath: /workspace
+                resources:
+                  requests:
+                    memory: "1Gi"
+                    cpu: "500m"
+                  limits:
+                    memory: "2Gi"
+                    cpu: "1000m"
+                securityContext:
+                  runAsUser: 1000
+                  runAsNonRoot: true
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                    - ALL
+              volumes:
+              - name: workspace
+                emptyDir: {}
+        EOF
+          
+          echo "⏳ Waiting for frontend build to complete..."
+          kubectl wait --for=condition=complete job/frontend-build-pr-${{ github.event.pull_request.number }} \
+            --timeout=900s \
+            --namespace=github-runner || {
+            echo "❌ Frontend build failed"
+            kubectl logs job/frontend-build-pr-${{ github.event.pull_request.number }} --namespace=github-runner --tail=50
+            echo "⚠️ Frontend build failed, continuing..."
+          }
+          
+          echo "✅ Frontend image built successfully with Kaniko"
+          
+          # Cleanup frontend job
+          kubectl delete job frontend-build-pr-${{ github.event.pull_request.number }} --namespace=github-runner --ignore-not-found=true
+        else
+          echo "⚠️ Frontend Dockerfile not found, skipping frontend build"
+        fi
+    
+    - name: 🔍 Debug Frontend Kaniko Build Failure
+      if: failure()
+      run: |
+        echo "🔍 ===================================="
+        echo "🔍 FRONTEND KANIKO BUILD FAILURE DIAGNOSTICS"
+        echo "🔍 ===================================="
+        
+        # Configuration for frontend build
+        JOB_NAME="frontend-build-pr-${{ github.event.pull_request.number }}"
+        NAMESPACE="github-runner"
+        BUILD_TYPE="frontend"
+        
+        echo "🔍 Job Name: $JOB_NAME"
+        echo "🔍 Namespace: $NAMESPACE"
+        echo "🔍 Build Type: $BUILD_TYPE"
+        echo ""
+        
+        # Step 1: Find the Kaniko pod
+        echo "📋 Step 1: Finding Kaniko pod..."
+        echo "==============================="
+        
+        KANIKO_POD=""
+        
+        # Find by job-name label
+        KANIKO_POD=$(kubectl get pods -n $NAMESPACE \
+          -l job-name=$JOB_NAME \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+        
+        if [[ -n "$KANIKO_POD" ]]; then
+          echo "✅ Found frontend pod: $KANIKO_POD"
+          
+          echo "🔍 Pod description:"
+          kubectl describe pod $KANIKO_POD -n $NAMESPACE 2>/dev/null || echo "❌ Pod description failed"
+          echo ""
+          
+          echo "🔍 Init container logs (prepare-build-context):"
+          kubectl logs $KANIKO_POD -n $NAMESPACE -c prepare-build-context --tail=50 2>/dev/null || \
+            echo "❌ No init container logs"
+          echo ""
+          
+          echo "🔍 Kaniko container logs:"
+          kubectl logs $KANIKO_POD -n $NAMESPACE -c kaniko --tail=100 2>/dev/null || \
+            kubectl logs $KANIKO_POD -n $NAMESPACE --all-containers=true --tail=50 2>/dev/null || \
+            echo "❌ No container logs available"
+        else
+          echo "❌ No frontend Kaniko pod found"
+          echo "📋 Available jobs:"
+          kubectl get jobs -n $NAMESPACE --sort-by=.metadata.creationTimestamp | grep -E "(frontend|build)"
+        fi
+        
+        echo "🔍 ============================="
+        echo "🔍 END FRONTEND FAILURE ANALYSIS"
+        echo "🔍 ==============================="
+    
+    - name: 🧪 Test Container Functionality
+      run: |
+        echo "🧪 Testing Kaniko-built containers..."
+        
+        # Test backend container functionality with optimized configuration
+        echo "🔍 Testing backend container startup..."
+        cat <<EOF | kubectl apply -f -
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: backend-test-pr-${{ github.event.pull_request.number }}
+          namespace: github-runner
+          labels:
+            app: container-test
+            test-type: startup
+            pr-number: "${{ github.event.pull_request.number }}"
+        spec:
+          restartPolicy: Never
+          serviceAccountName: github-runner  # Use dedicated ServiceAccount
+          containers:
+          - name: backend
+            image: speecher-backend:pr-${{ github.event.pull_request.number }}
+            imagePullPolicy: Never
+            command: ["python", "--version"]
+            resources:
+              requests:
+                memory: "128Mi"
+                cpu: "100m"
+              limits:
+                memory: "256Mi"
+                cpu: "200m"
+            securityContext:
+              runAsUser: 1000
+              runAsNonRoot: true
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop:
+                - ALL
+        EOF
+        
+        # Wait for test to complete
+        echo "⏳ Waiting for container test to complete..."
+        kubectl wait --for=condition=ready pod/backend-test-pr-${{ github.event.pull_request.number }} \
+          --timeout=60s \
+          --namespace=github-runner || {
+          echo "⚠️ Backend container test failed, checking logs..."
+          kubectl logs backend-test-pr-${{ github.event.pull_request.number }} --namespace=github-runner --tail=20 || true
+          kubectl describe pod backend-test-pr-${{ github.event.pull_request.number }} --namespace=github-runner || true
+        }
+        
+        # Check final pod status
+        POD_STATUS=$(kubectl get pod backend-test-pr-${{ github.event.pull_request.number }} --namespace=github-runner -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+        echo "📋 Backend container test status: $POD_STATUS"
+        
+        # Cleanup test resources
+        kubectl delete pod backend-test-pr-${{ github.event.pull_request.number }} --namespace=github-runner --grace-period=30 || true
+        # Note: ConfigMaps and jobs are cleaned up immediately after each build step above
+        
+        echo "✅ Container build and test completed"
+
+  pr-status:
+    name: ✅ PR Status Check
+    runs-on: [self-hosted, linux, x64, kubernetes]
+    needs: [run-tests, code-quality, security-scan, container-build]  # Added container-build back
+    if: always()
+    
+    steps:
+    - name: 📊 Check all job results
+      run: |
+        if [[ "${{ needs.run-tests.result }}" == "failure" ]]; then
+          echo "❌ Required checks failed!"
+          exit 1
+        fi
+        echo "✅ All required checks passed!"
+    
+    # Comment disabled - requires pull-requests: write permission
+    # - name: 💬 Final status comment
+    #   if: github.event_name == 'pull_request'
+    #   uses: actions/github-script@v6
+    #   with:
+    #     script: |
+    #       const checksPassed = '${{ needs.run-tests.result }}' !== 'failure' && 
+    #                           '${{ needs.container-build.result }}' !== 'failure';
+    #       
+    #       const emoji = checksPassed ? '✅' : '❌';
+    #       const status = checksPassed ? 'ready to merge' : 'needs fixes';
+    #       
+    #       const comment = `## ${emoji} PR Status: ${status}
+    #       
+    #       | Check | Result |
+    #       |-------|--------|
+    #       | Tests | ${{ needs.run-tests.result }} |
+    #       | Code Quality | ${{ needs.code-quality.result }} |
+    #       | Security | ${{ needs.security-scan.result }} |
+    #       | Container Build | ${{ needs.container-build.result }} |
+    #       `;
+    #       
+    #       github.rest.issues.createComment({
+    #         issue_number: context.issue.number,
+    #         owner: context.repo.owner,
+    #         repo: context.repo.repo,
+    #         body: comment
+    #       });

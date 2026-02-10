@@ -3,9 +3,9 @@
 Extended unit tests for the transcription module.
 """
 
-import unittest
 import os
 import tempfile
+import unittest
 
 # Import the module to test
 import src.speecher.transcription as transcription

@@ -1,0 +1,236 @@
+# Comprehensive Kaniko Debug Step Template
+# This template should be added after each Kaniko build step that can fail
+# Replace variables in {{ }} with actual values for your workflow
+
+- name: 🔍 Debug Kaniko Build Failure
+  if: failure()  # Only run when previous Kaniko build steps fail
+  run: |
+    echo "🔍 ==================================="
+    echo "🔍 KANIKO BUILD FAILURE DIAGNOSTICS"
+    echo "🔍 ==================================="
+    
+    # Configuration variables - adjust these for each workflow
+    JOB_NAME="{{ kaniko_job_name }}"  # e.g., backend-build-pr-${{ github.event.pull_request.number }}
+    NAMESPACE="github-runner"
+    BUILD_TYPE="{{ build_type }}"     # e.g., backend, frontend
+    
+    echo "🔍 Job Name: $JOB_NAME"
+    echo "🔍 Namespace: $NAMESPACE"
+    echo "🔍 Build Type: $BUILD_TYPE"
+    echo ""
+    
+    # Step 1: Find the Kaniko pod using job selectors
+    echo "📋 Step 1: Finding Kaniko pod..."
+    echo "==============================="
+    
+    # Try multiple methods to find the pod
+    KANIKO_POD=""
+    
+    # Method 1: Find by job-name label (most reliable)
+    if [[ -z "$KANIKO_POD" ]]; then
+      KANIKO_POD=$(kubectl get pods -n $NAMESPACE \
+        -l job-name=$JOB_NAME \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+      [[ -n "$KANIKO_POD" ]] && echo "✅ Found pod by job-name label: $KANIKO_POD"
+    fi
+    
+    # Method 2: Find by app=kaniko-build label
+    if [[ -z "$KANIKO_POD" ]]; then
+      KANIKO_POD=$(kubectl get pods -n $NAMESPACE \
+        -l app=kaniko-build \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+      [[ -n "$KANIKO_POD" ]] && echo "✅ Found pod by app label: $KANIKO_POD"
+    fi
+    
+    # Method 3: Find by partial job name match
+    if [[ -z "$KANIKO_POD" ]]; then
+      KANIKO_POD=$(kubectl get pods -n $NAMESPACE \
+        --field-selector=status.phase!=Succeeded \
+        -o name 2>/dev/null | grep -E "(kaniko|build)" | head -1 | cut -d'/' -f2 || echo "")
+      [[ -n "$KANIKO_POD" ]] && echo "✅ Found pod by name pattern: $KANIKO_POD"
+    fi
+    
+    if [[ -z "$KANIKO_POD" ]]; then
+      echo "❌ No Kaniko pod found!"
+      echo "📋 Available pods in namespace $NAMESPACE:"
+      kubectl get pods -n $NAMESPACE --sort-by=.metadata.creationTimestamp
+      echo ""
+      echo "📋 Available jobs in namespace $NAMESPACE:"
+      kubectl get jobs -n $NAMESPACE --sort-by=.metadata.creationTimestamp
+      echo ""
+      echo "❌ Cannot proceed with pod-specific diagnostics"
+      KANIKO_POD_EXISTS=false
+    else
+      echo "✅ Using Kaniko pod: $KANIKO_POD"
+      KANIKO_POD_EXISTS=true
+    fi
+    echo ""
+    
+    # Step 2: Job Status and Events
+    echo "📋 Step 2: Job Status and Events"
+    echo "================================"
+    
+    echo "🔍 Job description:"
+    kubectl describe job $JOB_NAME -n $NAMESPACE 2>/dev/null || {
+      echo "❌ Job $JOB_NAME not found"
+      echo "📋 Available jobs:"
+      kubectl get jobs -n $NAMESPACE -o wide
+    }
+    echo ""
+    
+    echo "🔍 Job events:"
+    kubectl get events -n $NAMESPACE \
+      --field-selector involvedObject.name=$JOB_NAME \
+      --sort-by='.lastTimestamp' 2>/dev/null || echo "❌ No job events found"
+    echo ""
+    
+    # Step 3: Pod Diagnostics (if pod exists)
+    if [[ "$KANIKO_POD_EXISTS" == "true" ]]; then
+      echo "📋 Step 3: Pod Diagnostics"
+      echo "=========================="
+      
+      echo "🔍 Pod description:"
+      kubectl describe pod $KANIKO_POD -n $NAMESPACE 2>/dev/null || echo "❌ Pod description failed"
+      echo ""
+      
+      echo "🔍 Pod status:"
+      kubectl get pod $KANIKO_POD -n $NAMESPACE -o wide 2>/dev/null || echo "❌ Pod status failed"
+      echo ""
+      
+      echo "🔍 Pod events:"
+      kubectl get events -n $NAMESPACE \
+        --field-selector involvedObject.name=$KANIKO_POD \
+        --sort-by='.lastTimestamp' 2>/dev/null || echo "❌ No pod events found"
+      echo ""
+    fi
+    
+    # Step 4: Container Logs
+    echo "📋 Step 4: Container Logs"
+    echo "========================="
+    
+    if [[ "$KANIKO_POD_EXISTS" == "true" ]]; then
+      echo "🔍 Init container logs (prepare-build-context):"
+      echo "------------------------------------------------"
+      kubectl logs $KANIKO_POD -n $NAMESPACE -c prepare-build-context --tail=50 2>/dev/null || {
+        echo "❌ No init container logs available"
+        echo "🔍 Checking for alternative init container names..."
+        # Try other common init container names
+        kubectl logs $KANIKO_POD -n $NAMESPACE -c prepare-dockerfile --tail=50 2>/dev/null || \
+        kubectl logs $KANIKO_POD -n $NAMESPACE -c prepare-build-context --tail=50 2>/dev/null || \
+        echo "❌ No init container logs found with common names"
+      }
+      echo ""
+      
+      echo "🔍 Kaniko container logs:"
+      echo "-------------------------"
+      kubectl logs $KANIKO_POD -n $NAMESPACE -c kaniko --tail=100 2>/dev/null || {
+        echo "❌ No Kaniko container logs available"
+        echo "🔍 Trying to get logs from any container..."
+        kubectl logs $KANIKO_POD -n $NAMESPACE --tail=100 2>/dev/null || echo "❌ No pod logs available"
+      }
+      echo ""
+      
+      echo "🔍 All container logs (if above failed):"
+      echo "----------------------------------------"
+      kubectl logs $KANIKO_POD -n $NAMESPACE --all-containers=true --tail=50 2>/dev/null || \
+        echo "❌ Could not retrieve any container logs"
+      echo ""
+    else
+      echo "⚠️ No pod found - checking job logs directly"
+      kubectl logs job/$JOB_NAME -n $NAMESPACE --tail=100 2>/dev/null || echo "❌ No job logs available"
+      echo ""
+    fi
+    
+    # Step 5: Resource Status
+    echo "📋 Step 5: Resource Status"
+    echo "=========================="
+    
+    echo "🔍 Namespace resource overview:"
+    kubectl get all -n $NAMESPACE -l job-name=$JOB_NAME 2>/dev/null || {
+      echo "❌ No resources found with job-name label"
+      echo "🔍 All recent resources in namespace:"
+      kubectl get pods,jobs,configmaps -n $NAMESPACE --sort-by=.metadata.creationTimestamp | tail -20
+    }
+    echo ""
+    
+    echo "🔍 ConfigMaps related to build:"
+    kubectl get configmaps -n $NAMESPACE -o name | grep -E "(dockerfile|context|build)" | head -5 || \
+      echo "❌ No build-related ConfigMaps found"
+    echo ""
+    
+    echo "🔍 Resource quotas and limits:"
+    kubectl describe quota -n $NAMESPACE 2>/dev/null || echo "ℹ️ No resource quotas configured"
+    kubectl describe limitrange -n $NAMESPACE 2>/dev/null || echo "ℹ️ No limit ranges configured"
+    echo ""
+    
+    # Step 6: Node and Cluster Status
+    echo "📋 Step 6: Node and Cluster Status"
+    echo "=================================="
+    
+    echo "🔍 Cluster info:"
+    kubectl cluster-info 2>/dev/null || echo "❌ Cluster info failed"
+    echo ""
+    
+    echo "🔍 Node status (if permissions allow):"
+    kubectl get nodes -o wide 2>/dev/null || echo "⚠️ Cannot access node information (insufficient permissions)"
+    echo ""
+    
+    if [[ "$KANIKO_POD_EXISTS" == "true" ]]; then
+      echo "🔍 Node where pod was scheduled:"
+      NODE_NAME=$(kubectl get pod $KANIKO_POD -n $NAMESPACE -o jsonpath='{.spec.nodeName}' 2>/dev/null)
+      if [[ -n "$NODE_NAME" ]]; then
+        echo "Pod was scheduled on node: $NODE_NAME"
+        kubectl describe node $NODE_NAME 2>/dev/null | head -30 || echo "❌ Cannot describe node"
+      else
+        echo "❌ Could not determine node assignment"
+      fi
+      echo ""
+    fi
+    
+    # Step 7: Recent Events Summary
+    echo "📋 Step 7: Recent Events Summary"
+    echo "================================"
+    
+    echo "🔍 Recent events in namespace (last 10 minutes):"
+    kubectl get events -n $NAMESPACE \
+      --sort-by='.lastTimestamp' \
+      --field-selector reason!=Scheduled,reason!=Pulled,reason!=Created \
+      2>/dev/null | tail -20 || echo "❌ Could not fetch recent events"
+    echo ""
+    
+    # Step 8: Troubleshooting Suggestions
+    echo "📋 Step 8: Troubleshooting Suggestions"
+    echo "======================================"
+    
+    echo "🔧 Common Kaniko failure causes:"
+    echo "1. ❌ Init container failed to prepare build context"
+    echo "   - Check git clone permissions and network connectivity"
+    echo "   - Verify GitHub repository URL and commit SHA"
+    echo ""
+    echo "2. ❌ Kaniko executor failed to build"
+    echo "   - Check Dockerfile syntax and base image availability"
+    echo "   - Verify build context structure and file paths"
+    echo "   - Check resource limits (memory/CPU)"
+    echo ""
+    echo "3. ❌ Pod scheduling issues"
+    echo "   - Check node resources and availability"
+    echo "   - Verify service account permissions"
+    echo "   - Check namespace resource quotas"
+    echo ""
+    echo "4. ❌ Network or registry issues"
+    echo "   - Check internet connectivity from pods"
+    echo "   - Verify base image registry accessibility"
+    echo "   - Check DNS resolution"
+    echo ""
+    
+    echo "🔧 Next debugging steps:"
+    echo "1. Review init container logs for git clone issues"
+    echo "2. Check Kaniko logs for Docker build failures"
+    echo "3. Verify Dockerfile and build context structure"
+    echo "4. Check resource quotas and node capacity"
+    echo "5. Test base image accessibility manually"
+    echo ""
+    
+    echo "🔍 ============================="
+    echo "🔍 END KANIKO FAILURE ANALYSIS"
+    echo "🔍 ============================="

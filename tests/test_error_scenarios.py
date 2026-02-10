@@ -4,20 +4,21 @@ Error handling and edge case tests.
 Following TDD approach - tests written first, then implementation.
 """
 
-import pytest
 import asyncio
 import io
-from unittest.mock import patch, AsyncMock
-from fastapi.testclient import TestClient
+import os
 
 # Import modules to test
 import sys
-import os
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.backend.main import app
 from src.backend.api_keys import APIKeysManager
+from src.backend.main import app
 from src.backend.streaming import WebSocketManager
 
 

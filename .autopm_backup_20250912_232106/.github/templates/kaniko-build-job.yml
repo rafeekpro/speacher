@@ -1,0 +1,78 @@
+# Reusable Kaniko Build Job Template
+# This template provides a standardized way to build container images using Kaniko in Kubernetes
+# 
+# Usage: Replace placeholders with actual values:
+# - {{JOB_NAME}}: Unique job name (e.g., backend-build-123)
+# - {{NAMESPACE}}: Build namespace (e.g., build-ci-123)
+# - {{BUILD_CONTEXT_CONFIGMAP}}: Name of ConfigMap containing build context
+# - {{DOCKERFILE_PATH}}: Path to Dockerfile (e.g., /workspace/Dockerfile)
+# - {{DESTINATION_IMAGE}}: Target image name and tag (e.g., app:tag)
+# - {{CACHE_REPO}}: Optional cache repository for build cache
+# - {{MEMORY_REQUEST}}: Memory request (e.g., 1Gi)
+# - {{MEMORY_LIMIT}}: Memory limit (e.g., 2Gi)
+# - {{CPU_REQUEST}}: CPU request (e.g., 500m)
+# - {{CPU_LIMIT}}: CPU limit (e.g., 1000m)
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{JOB_NAME}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app: kaniko-build
+    build-type: container
+spec:
+  # Clean up automatically after 1 hour
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: kaniko-build
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:latest
+        args:
+        - --dockerfile={{DOCKERFILE_PATH}}
+        - --context=/workspace
+        - --destination={{DESTINATION_IMAGE}}
+        - --cache=true
+        - --cache-ttl=24h
+        # Optional cache repo (uncomment if needed)
+        # - --cache-repo={{CACHE_REPO}}
+        # Build arguments (uncomment and modify as needed)
+        # - --build-arg=BUILDKIT_INLINE_CACHE=1
+        # - --build-arg=NODE_ENV=production
+        volumeMounts:
+        - name: build-context
+          mountPath: /workspace
+        resources:
+          requests:
+            memory: "{{MEMORY_REQUEST}}"
+            cpu: "{{CPU_REQUEST}}"
+          limits:
+            memory: "{{MEMORY_LIMIT}}"
+            cpu: "{{CPU_LIMIT}}"
+        # Security context for better security
+        securityContext:
+          runAsUser: 1000
+          runAsNonRoot: true
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: build-context
+        configMap:
+          name: {{BUILD_CONTEXT_CONFIGMAP}}
+      # Optional: Node selector for specific build nodes
+      # nodeSelector:
+      #   node-type: build
+      # Optional: Tolerations for build nodes
+      # tolerations:
+      # - key: "build-only"
+      #   operator: "Equal"
+      #   value: "true"
+      #   effect: "NoSchedule"

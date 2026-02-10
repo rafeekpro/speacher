@@ -18,12 +18,12 @@ import {
   Paper
 } from '@mui/material';
 import {
-  Close as CloseIcon,
+  X as CloseIcon,
   Settings as SettingsIcon,
-  Translate as TranslateIcon,
-  VpnKey as KeyIcon,
-  Tune as TuneIcon
-} from '@mui/icons-material';
+  Languages as TranslateIcon,
+  Key as KeyIcon,
+  SlidersHorizontal as TuneIcon
+} from 'lucide-react';
 import APIKeysSettings from './APIKeysSettings';
 
 function TabPanel({ children, value, index, ...other }) {
@@ -83,7 +83,7 @@ const Settings = ({ settings, onSettingsChange, onClose }) => {
 
   const loadConfiguredProviders = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/keys');
+      const response = await fetch('/api/keys');
       if (response.ok) {
         const providers = await response.json();
         setConfiguredProviders(providers);
@@ -105,11 +105,11 @@ const Settings = ({ settings, onSettingsChange, onClose }) => {
       {/* Header */}
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
         <Typography variant="h5" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <SettingsIcon />
+          <SettingsIcon size={24} />
           Settings
         </Typography>
         <IconButton onClick={onClose}>
-          <CloseIcon />
+          <CloseIcon size={24} />
         </IconButton>
       </Box>
       
@@ -122,9 +122,9 @@ const Settings = ({ settings, onSettingsChange, onClose }) => {
         variant="fullWidth"
         sx={{ mb: 2 }}
       >
-        <Tab icon={<TuneIcon />} label="General" />
-        <Tab icon={<KeyIcon />} label="API Keys" />
-        <Tab icon={<TranslateIcon />} label="Advanced" />
+        <Tab icon={<TuneIcon size={20} />} label="General" />
+        <Tab icon={<KeyIcon size={20} />} label="API Keys" />
+        <Tab icon={<TranslateIcon size={20} />} label="Advanced" />
       </Tabs>
       
       {/* General Settings */}

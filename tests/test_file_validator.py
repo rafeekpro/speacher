@@ -1,10 +1,10 @@
 """Tests for file validation utilities"""
 
 from src.backend.file_validator import (
-    validate_audio_file,
-    detect_audio_format,
     AudioFormat,
+    detect_audio_format,
     get_audio_duration_estimate,
+    validate_audio_file,
 )
 
 

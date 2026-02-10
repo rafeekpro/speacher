@@ -34,9 +34,9 @@ if ! docker info &> /dev/null; then
     exit 1
 fi
 
-# Check if docker-compose is available
-if ! command -v docker-compose &> /dev/null; then
-    print_warn "docker-compose not found, trying docker compose..."
+# Check if docker compose is available
+if ! command -v docker compose &> /dev/null; then
+    print_warn "docker compose not found, trying docker compose..."
     if ! docker compose version &> /dev/null; then
         print_error "Docker Compose is not available."
         exit 1

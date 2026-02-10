@@ -2,53 +2,53 @@ services:
   # PostgreSQL database for development
   postgres:
     image: postgres:15-alpine
-    container_name: speecher-postgres-dev
+    container_name: speacher-postgres-dev
     restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: speecher
-      POSTGRES_PASSWORD: speecher_dev_pass
-      POSTGRES_DB: speecher_dev
+      POSTGRES_USER: speacher
+      POSTGRES_PASSWORD: speacher_dev_pass
+      POSTGRES_DB: speacher_dev
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/init-postgres.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U speecher -d speecher_dev"]
+      test: ["CMD-SHELL", "pg_isready -U speacher -d speacher_dev"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
     networks:
-      - speecher-dev-network
+      - speacher-dev-network
 
   # MongoDB for development (if still needed)
   mongodb:
     image: mongo:7.0
-    container_name: speecher-mongodb-dev
+    container_name: speacher-mongodb-dev
     restart: unless-stopped
     ports:
       - "27017:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: speecher_admin_pass
-      MONGO_INITDB_DATABASE: speecher_dev
+      MONGO_INITDB_ROOT_PASSWORD: speacher_admin_pass
+      MONGO_INITDB_DATABASE: speacher_dev
     volumes:
       - mongodb_data:/data/db
       - ./docker/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
     healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/speecher_dev --quiet
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/speacher_dev --quiet
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
     networks:
-      - speecher-dev-network
+      - speacher-dev-network
 
   # Redis for caching/sessions
   redis:
     image: redis:7-alpine
-    container_name: speecher-redis-dev
+    container_name: speacher-redis-dev
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -61,21 +61,21 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - speecher-dev-network
+      - speacher-dev-network
 
   # Backend with hot-reload
   backend:
     build:
       context: .
       dockerfile: docker/backend.Dockerfile
-    container_name: speecher-backend-dev
+    container_name: speacher-backend-dev
     restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
       # Database configuration
-      DATABASE_URL: postgresql://speecher:speecher_dev_pass@postgres:5432/speecher_dev
-      MONGODB_URI: mongodb://admin:speecher_admin_pass@mongodb:27017/speecher_dev?authSource=admin
+      DATABASE_URL: postgresql://speacher:speacher_dev_pass@postgres:5432/speacher_dev
+      MONGODB_URI: mongodb://admin:speacher_admin_pass@mongodb:27017/speacher_dev?authSource=admin
       REDIS_URL: redis://redis:6379/0
       
       # Application settings
@@ -96,24 +96,24 @@ services:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
-      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-speecher-audio-dev}
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-speacher-audio-dev}
       
       # Azure Configuration (optional)
       AZURE_STORAGE_ACCOUNT: ${AZURE_STORAGE_ACCOUNT:-}
       AZURE_STORAGE_KEY: ${AZURE_STORAGE_KEY:-}
-      AZURE_CONTAINER_NAME: ${AZURE_CONTAINER_NAME:-speecher-dev}
+      AZURE_CONTAINER_NAME: ${AZURE_CONTAINER_NAME:-speacher-dev}
       AZURE_SPEECH_KEY: ${AZURE_SPEECH_KEY:-}
       AZURE_SPEECH_REGION: ${AZURE_SPEECH_REGION:-eastus}
       
       # Google Cloud Configuration (optional)
       GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
-      GCP_BUCKET_NAME: ${GCP_BUCKET_NAME:-speecher-gcp-dev}
+      GCP_BUCKET_NAME: ${GCP_BUCKET_NAME:-speacher-gcp-dev}
       GCP_CREDENTIALS_FILE: ${GCP_CREDENTIALS_FILE:-}
       
     volumes:
       # Mount source code for hot-reload
       - ./src/backend:/app/src/backend:cached
-      - ./src/speecher:/app/src/speecher:cached
+      - ./src/speacher:/app/src/speacher:cached
       - ./tests:/app/tests:cached
       # Mount pyproject.toml for dependency changes
       - ./pyproject.toml:/app/pyproject.toml:ro
@@ -134,7 +134,7 @@ services:
       retries: 3
       start_period: 40s
     networks:
-      - speecher-dev-network
+      - speacher-dev-network
     # Override command for hot-reload with watchfiles
     command: ["uvicorn", "src.backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--reload-dir", "/app/src/backend"]
 
@@ -143,7 +143,7 @@ services:
     build:
       context: .
       dockerfile: docker/react.dev.Dockerfile
-    container_name: speecher-react-dev
+    container_name: speacher-react-dev
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -176,14 +176,14 @@ services:
       retries: 3
       start_period: 60s
     networks:
-      - speecher-dev-network
+      - speacher-dev-network
     stdin_open: true  # Keep STDIN open for interactive debugging
     tty: true  # Allocate a pseudo-TTY
 
   # Nginx reverse proxy for development (optional, simulates production)
   nginx:
     image: nginx:alpine
-    container_name: speecher-nginx-dev
+    container_name: speacher-nginx-dev
     restart: unless-stopped
     ports:
       - "80:80"
@@ -195,19 +195,19 @@ services:
       - backend
       - frontend
     networks:
-      - speecher-dev-network
+      - speacher-dev-network
     profiles:
       - with-proxy  # Only run when explicitly requested
 
   # Development tools container (optional)
   devtools:
     image: node:18-alpine
-    container_name: speecher-devtools
+    container_name: speacher-devtools
     working_dir: /workspace
     volumes:
       - .:/workspace:cached
     networks:
-      - speecher-dev-network
+      - speacher-dev-network
     profiles:
       - tools  # Only run when explicitly requested
     command: ["tail", "-f", "/dev/null"]  # Keep container running
@@ -217,17 +217,17 @@ services:
     build:
       context: .
       dockerfile: docker/test.Dockerfile
-    container_name: speecher-tests-dev
+    container_name: speacher-tests-dev
     environment:
-      DATABASE_URL: postgresql://speecher:speecher_dev_pass@postgres:5432/speecher_test
-      MONGODB_URI: mongodb://admin:speecher_admin_pass@mongodb:27017/speecher_test?authSource=admin
+      DATABASE_URL: postgresql://speacher:speacher_dev_pass@postgres:5432/speacher_test
+      MONGODB_URI: mongodb://admin:speacher_admin_pass@mongodb:27017/speacher_test?authSource=admin
       REDIS_URL: redis://redis:6379/1
       BACKEND_URL: http://backend:8000
       PYTHONUNBUFFERED: 1
       PYTEST_ADDOPTS: "-vv --tb=short --color=yes"
     volumes:
       - ./src/backend:/app/src/backend:cached
-      - ./src/speecher:/app/src/speecher:cached
+      - ./src/speacher:/app/src/speacher:cached
       - ./tests:/app/tests:cached
       - ./test_results:/app/test_results
       - ./pyproject.toml:/app/pyproject.toml:ro
@@ -242,7 +242,7 @@ services:
       backend:
         condition: service_healthy
     networks:
-      - speecher-dev-network
+      - speacher-dev-network
     profiles:
       - test  # Only run when explicitly requested
     command: ["pytest", "tests/", "-v", "--tb=short", "--junit-xml=/app/test_results/results.xml"]
@@ -256,7 +256,7 @@ volumes:
     driver: local
 
 networks:
-  speecher-dev-network:
+  speacher-dev-network:
     driver: bridge
     ipam:
       config:

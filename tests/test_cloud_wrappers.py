@@ -4,7 +4,7 @@ Unit tests for the cloud_wrappers module which provides backend API wrappers for
 """
 
 import unittest
-from unittest.mock import patch, MagicMock, mock_open
+from unittest.mock import MagicMock, mock_open, patch
 
 # Import the module to test
 import src.backend.cloud_wrappers as cloud_wrappers

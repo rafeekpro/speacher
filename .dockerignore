@@ -33,6 +33,7 @@ ENV/
 # Documentation
 docs/
 *.md
+!README.md
 LICENSE
 
 # Test files
@@ -46,6 +47,9 @@ config/.env.example
 .env
 .env.example
 .envrc
+
+# EXCEPTION: Allow root .env for React build-time configuration
+!.env
 
 # Package managers
 poetry.lock

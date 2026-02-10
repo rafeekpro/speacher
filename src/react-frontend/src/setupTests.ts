@@ -11,6 +11,7 @@ jest.mock('axios', () => ({
     get: jest.fn(),
     put: jest.fn(),
     delete: jest.fn(),
+    request: jest.fn(),
     create: jest.fn(() => ({
       interceptors: {
         request: { use: jest.fn(), eject: jest.fn() },
@@ -22,6 +23,7 @@ jest.mock('axios', () => ({
   get: jest.fn(),
   put: jest.fn(),
   delete: jest.fn(),
+  request: jest.fn(),
   create: jest.fn(() => ({
     interceptors: {
       request: { use: jest.fn(), eject: jest.fn() },

@@ -156,28 +156,38 @@ const TranscriptionResults = ({ transcriptions }) => {
           </div>
 
           <div className="transcription-content">
-            <p className="transcript-text">{transcript.transcript}</p>
-            
-            {transcript.speakers && transcript.speakers.length > 0 && (
+            {transcript.speakers && transcript.speakers.length > 0 ? (
+              // Show speaker segments as main content when diarization is enabled
               <div className="speakers-section">
                 <h4>
                   <User size={16} />
-                  Speaker Segments
+                  Speaker Segments ({transcript.speakers.length})
                 </h4>
                 <div className="speakers-list">
-                  {transcript.speakers.slice(0, 5).map((speaker, idx) => (
+                  {transcript.speakers.map((speaker, idx) => (
                     <div key={idx} className="speaker-segment">
-                      <span className="speaker-label">{speaker.speaker}:</span>
-                      <span className="speaker-text">{speaker.text}</span>
+                      <div className="speaker-header">
+                        <span className="speaker-label">{speaker.speaker}</span>
+                        {speaker.start_time && speaker.end_time && (
+                          <span className="segment-time">
+                            {speaker.start_time} - {speaker.end_time}
+                          </span>
+                        )}
+                      </div>
+                      <p className="speaker-text">{speaker.text}</p>
                     </div>
                   ))}
-                  {transcript.speakers.length > 5 && (
-                    <p className="more-segments">
-                      ...and {transcript.speakers.length - 5} more segments
-                    </p>
-                  )}
                 </div>
+                {transcript.transcript && (
+                  <details className="full-transcript-section">
+                    <summary>View full transcript (raw text)</summary>
+                    <p className="transcript-text">{transcript.transcript}</p>
+                  </details>
+                )}
               </div>
+            ) : (
+              // No speaker segments - show full transcript as main content
+              <p className="transcript-text">{transcript.transcript}</p>
             )}
           </div>
 

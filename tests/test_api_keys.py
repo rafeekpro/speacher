@@ -3,10 +3,10 @@
 Unit tests for the api_keys module which manages encrypted API key storage.
 """
 
-import unittest
 import os
-from unittest.mock import patch, MagicMock
+import unittest
 from datetime import datetime
+from unittest.mock import MagicMock, patch
 
 # Import the module to test
 from src.backend.api_keys import APIKeysManager

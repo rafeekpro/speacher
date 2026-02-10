@@ -34,111 +34,111 @@ help:
 
 # Development commands
 dev:
-	docker-compose -f docker-compose.dev.yml up
+	docker compose -f docker-compose.dev.yml up
 
 dev-d:
-	docker-compose -f docker-compose.dev.yml up -d
+	docker compose -f docker-compose.dev.yml up -d
 
 dev-build:
-	docker-compose -f docker-compose.dev.yml build
+	docker compose -f docker-compose.dev.yml build
 
 dev-rebuild:
-	docker-compose -f docker-compose.dev.yml build --no-cache
+	docker compose -f docker-compose.dev.yml build --no-cache
 
 dev-down:
-	docker-compose -f docker-compose.dev.yml down
+	docker compose -f docker-compose.dev.yml down
 
 dev-clean:
-	docker-compose -f docker-compose.dev.yml down -v
+	docker compose -f docker-compose.dev.yml down -v
 
 dev-restart:
-	docker-compose -f docker-compose.dev.yml restart
+	docker compose -f docker-compose.dev.yml restart
 
 # Production commands
 prod:
-	docker-compose -f docker-compose.prod.yml up
+	docker compose -f docker-compose.prod.yml up
 
 prod-d:
-	docker-compose -f docker-compose.prod.yml up -d
+	docker compose -f docker-compose.prod.yml up -d
 
 prod-build:
-	docker-compose -f docker-compose.prod.yml build
+	docker compose -f docker-compose.prod.yml build
 
 prod-push:
-	docker-compose -f docker-compose.prod.yml push
+	docker compose -f docker-compose.prod.yml push
 
 prod-down:
-	docker-compose -f docker-compose.prod.yml down
+	docker compose -f docker-compose.prod.yml down
 
 prod-clean:
-	docker-compose -f docker-compose.prod.yml down -v
+	docker compose -f docker-compose.prod.yml down -v
 
 # Testing commands
 test:
-	docker-compose -f docker-compose.dev.yml --profile test up test-runner
+	docker compose -f docker-compose.dev.yml --profile test up test-runner
 
 test-backend:
-	docker-compose -f docker-compose.dev.yml run --rm test-runner pytest tests/backend/ -v
+	docker compose -f docker-compose.dev.yml run --rm test-runner pytest tests/backend/ -v
 
 test-frontend:
-	docker-compose -f docker-compose.dev.yml exec frontend npm test
+	docker compose -f docker-compose.dev.yml exec frontend npm test
 
 test-e2e:
-	docker-compose -f docker-compose.dev.yml run --rm test-runner pytest tests/e2e/ -v
+	docker compose -f docker-compose.dev.yml run --rm test-runner pytest tests/e2e/ -v
 
 test-coverage:
-	docker-compose -f docker-compose.dev.yml run --rm test-runner pytest --cov=src --cov-report=html --cov-report=term
+	docker compose -f docker-compose.dev.yml run --rm test-runner pytest --cov=src --cov-report=html --cov-report=term
 
 # Logging commands
 logs:
-	docker-compose -f docker-compose.dev.yml logs -f
+	docker compose -f docker-compose.dev.yml logs -f
 
 logs-backend:
-	docker-compose -f docker-compose.dev.yml logs -f backend
+	docker compose -f docker-compose.dev.yml logs -f backend
 
 logs-frontend:
-	docker-compose -f docker-compose.dev.yml logs -f frontend
+	docker compose -f docker-compose.dev.yml logs -f frontend
 
 logs-db:
-	docker-compose -f docker-compose.dev.yml logs -f postgres
+	docker compose -f docker-compose.dev.yml logs -f postgres
 
 # Shell access
 shell-backend:
-	docker-compose -f docker-compose.dev.yml exec backend bash
+	docker compose -f docker-compose.dev.yml exec backend bash
 
 shell-frontend:
-	docker-compose -f docker-compose.dev.yml exec frontend sh
+	docker compose -f docker-compose.dev.yml exec frontend sh
 
 shell-test:
-	docker-compose -f docker-compose.dev.yml run --rm test-runner bash
+	docker compose -f docker-compose.dev.yml run --rm test-runner bash
 
 db-shell:
-	docker-compose -f docker-compose.dev.yml exec postgres psql -U speecher -d speecher_dev
+	docker compose -f docker-compose.dev.yml exec postgres psql -U speecher -d speecher_dev
 
 mongo-shell:
-	docker-compose -f docker-compose.dev.yml exec mongodb mongosh -u admin -p speecher_admin_pass
+	docker compose -f docker-compose.dev.yml exec mongodb mongosh -u admin -p speecher_admin_pass
 
 redis-cli:
-	docker-compose -f docker-compose.dev.yml exec redis redis-cli
+	docker compose -f docker-compose.dev.yml exec redis redis-cli
 
 # Database operations
 db-migrate:
-	docker-compose -f docker-compose.dev.yml exec backend alembic upgrade head
+	docker compose -f docker-compose.dev.yml exec backend alembic upgrade head
 
 db-rollback:
-	docker-compose -f docker-compose.dev.yml exec backend alembic downgrade -1
+	docker compose -f docker-compose.dev.yml exec backend alembic downgrade -1
 
 db-reset:
-	docker-compose -f docker-compose.dev.yml exec backend alembic downgrade base
-	docker-compose -f docker-compose.dev.yml exec backend alembic upgrade head
+	docker compose -f docker-compose.dev.yml exec backend alembic downgrade base
+	docker compose -f docker-compose.dev.yml exec backend alembic upgrade head
 
 db-seed:
-	docker-compose -f docker-compose.dev.yml exec backend python scripts/seed_database.py
+	docker compose -f docker-compose.dev.yml exec backend python scripts/seed_database.py
 
 # Maintenance commands
 clean:
-	docker-compose -f docker-compose.dev.yml down -v --remove-orphans
-	docker-compose -f docker-compose.prod.yml down -v --remove-orphans
+	docker compose -f docker-compose.dev.yml down -v --remove-orphans
+	docker compose -f docker-compose.prod.yml down -v --remove-orphans
 
 prune:
 	docker system prune -af --volumes
@@ -147,25 +147,25 @@ stats:
 	docker stats --no-stream
 
 ps:
-	docker-compose -f docker-compose.dev.yml ps
+	docker compose -f docker-compose.dev.yml ps
 
 images:
 	docker images | grep speecher
 
 # Build specific services
 build-backend:
-	docker-compose -f docker-compose.dev.yml build backend
+	docker compose -f docker-compose.dev.yml build backend
 
 build-frontend:
-	docker-compose -f docker-compose.dev.yml build frontend
+	docker compose -f docker-compose.dev.yml build frontend
 
 # Health checks
 health:
 	@echo "Checking service health..."
 	@curl -f http://localhost:8000/health || echo "Backend: DOWN"
 	@curl -f http://localhost:3000/ || echo "Frontend: DOWN"
-	@docker-compose -f docker-compose.dev.yml exec postgres pg_isready || echo "PostgreSQL: DOWN"
-	@docker-compose -f docker-compose.dev.yml exec redis redis-cli ping || echo "Redis: DOWN"
+	@docker compose -f docker-compose.dev.yml exec postgres pg_isready || echo "PostgreSQL: DOWN"
+	@docker compose -f docker-compose.dev.yml exec redis redis-cli ping || echo "Redis: DOWN"
 
 # Security scanning
 scan-backend:

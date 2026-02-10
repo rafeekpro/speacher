@@ -4,8 +4,9 @@ Advanced WebSocket tests for streaming functionality.
 Following TDD approach - tests written first, then implementation.
 """
 
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 from fastapi.websockets import WebSocket
 
 from src.backend.streaming import WebSocketManager

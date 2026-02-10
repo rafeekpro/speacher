@@ -14,14 +14,11 @@ import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from bson import ObjectId
-
 # Load environment variables from .env file
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from pymongo import MongoClient
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -31,45 +28,47 @@ logger.setLevel(logging.DEBUG)
 env_path = os.getenv("DOTENV_PATH") or find_dotenv()
 load_dotenv(env_path)
 
-# Add parent directory to path to import speecher module
+# Add parent directory to path to import speacher module
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Import cloud wrappers for missing functions
 from backend import cloud_wrappers
+# Removed: from backend.cloud_wrappers import aws_service
+# Use get_aws_service() function instead to pass credentials dynamically
 
-# Import API keys manager
+# Import API routers
+from backend.api_v2 import auth_router, users_router, projects_router
+
+# Import API keys manager (now using PostgreSQL)
 from backend.api_keys import APIKeysManager
 
-# Import API v2 routers
-from backend.api_v2 import auth_router, projects_router, users_router
+# Import transcription database manager (PostgreSQL)
+from backend.transcriptions_db import transcription_manager
 
-# Import streaming module for real-time transcription
-from backend.streaming import handle_websocket_streaming
-from speecher import aws as aws_service
+# Import transcription job manager for real-time progress tracking
+from backend.transcription_jobs import TranscriptionJobManager, JobStatus
+
+# Create global job manager instance
+job_manager = TranscriptionJobManager()
+
+# Import authentication dependencies
+from backend.auth import require_auth
+from backend.models import UserDB
+from src.backend.users_db import user_db  # For user database operations
 
 # Configuration from environment variables
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-MONGODB_DB = os.getenv("MONGODB_DB", "speecher")
-MONGODB_COLLECTION = os.getenv("MONGODB_COLLECTION", "transcriptions")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://speacher_user:SpeacherPro4_2024!@10.0.0.5:30432/speacher")
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB limit
 
 # Cloud provider configurations
-# S3 bucket names are now configured per-provider in the database
 AZURE_STORAGE_ACCOUNT = os.getenv("AZURE_STORAGE_ACCOUNT")
 AZURE_STORAGE_KEY = os.getenv("AZURE_STORAGE_KEY")
-AZURE_CONTAINER_NAME = os.getenv("AZURE_CONTAINER_NAME", "speecher")
-# GCS bucket names are now configured per-provider in the database
+AZURE_CONTAINER_NAME = os.getenv("AZURE_STORAGE_CONTAINER_NAME", "speacher")
+GCP_PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+GCP_BUCKET_NAME = os.getenv("GCP_BUCKET_NAME", "speacher-gcp")
 
-# Initialize MongoDB client and collection
-mongo_client = MongoClient(MONGODB_URI)
-db = mongo_client[MONGODB_DB]
-collection = db[MONGODB_COLLECTION]
-
-# Initialize API Keys Manager
-api_keys_manager = APIKeysManager(MONGODB_URI, MONGODB_DB)
-
-# MongoDB collections
-transcriptions_collection = db["transcriptions"]
+# Initialize API Keys Manager (PostgreSQL)
+api_keys_manager = APIKeysManager(DATABASE_URL)
 
 
 class CloudProvider(str, Enum):
@@ -97,7 +96,7 @@ class TranscriptionResponse(BaseModel):
 
 
 app = FastAPI(
-    title="Speecher Transcription API",
+    title="Speacher Transcription API",
     description="Multi-cloud audio transcription service with speaker diarization",
     version="1.2.0",
 )
@@ -105,7 +104,12 @@ app = FastAPI(
 # Add CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=[
+        "http://speacher.local.pro4.es",
+        "http://speacher-api.local.pro4.es",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -120,7 +124,7 @@ app.include_router(projects_router)
 @app.get("/")
 async def root():
     """Root endpoint."""
-    return {"message": "Welcome to Speecher API", "version": "1.0.0"}
+    return {"message": "Welcome to Speacher API", "version": "1.0.0"}
 
 
 @app.get("/providers")
@@ -137,6 +141,7 @@ async def transcribe(
     enable_diarization: bool = Form(True),
     max_speakers: Optional[int] = Form(4),
     include_timestamps: bool = Form(True),
+    current_user: UserDB = Depends(require_auth),
 ):
     """
     Upload an audio file and transcribe it using the selected cloud provider.
@@ -210,7 +215,7 @@ async def transcribe(
         if provider == CloudProvider.AWS.value:
             try:
                 result = await process_aws_transcription(
-                    temp_file_path, file.filename, language, enable_diarization, max_speakers
+                    temp_file_path, file.filename, language, enable_diarization, max_speakers, current_user
                 )
             except Exception as e:
                 logger.error(f"AWS Transcription Error: {e}")
@@ -246,23 +251,28 @@ async def transcribe(
         duration = result.get("duration", 0)
         cost_estimate = calculate_cost(provider, duration)
 
-        # Store in MongoDB
-        doc = {
-            "filename": file.filename,
-            "provider": provider,
-            "language": language,
-            "transcript": transcript_text,
-            "speakers": speakers,
-            "enable_diarization": enable_diarization,
-            "max_speakers": max_speakers,
-            "duration": duration,
-            "cost_estimate": cost_estimate,
-            "created_at": datetime.datetime.utcnow(),
-            "file_size": file.size,
-        }
+        # Store in PostgreSQL
+        doc_id = transcription_manager.save_transcription(
+            filename=file.filename,
+            provider=provider,
+            language=language,
+            transcript=transcript_text,
+            speakers=speakers,
+            enable_diarization=enable_diarization,
+            max_speakers=max_speakers,
+            duration=duration,
+            cost_estimate=cost_estimate,
+            file_size=file.size if hasattr(file, 'size') else len(file_content),
+            audio_file_id=None,  # Not tracking audio files separately for now
+            user_id=current_user.id,  # Authenticated user
+        )
 
-        result = collection.insert_one(doc)
-        doc_id = str(result.inserted_id)
+        if not doc_id:
+            logger.error("Failed to save transcription to database!")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to save transcription to database. Please check database connection."
+            )
 
         return TranscriptionResponse(
             id=doc_id,
@@ -286,8 +296,173 @@ async def transcribe(
             pass
 
 
+@app.post("/transcribe/async", response_model=Dict[str, str])
+async def transcribe_async(
+    file: UploadFile = File(...),
+    provider: str = Form("aws"),
+    language: str = Form("en-US"),
+    enable_diarization: bool = Form(True),
+    max_speakers: Optional[int] = Form(4),
+    current_user: UserDB = Depends(require_auth),
+):
+    """
+    Upload an audio file and start asynchronous transcription.
+
+    Returns a job_id immediately that can be used to track progress
+    via WebSocket endpoint /ws/transcribe/{job_id}.
+
+    The transcription runs in the background and clients can receive
+    real-time progress updates through WebSocket.
+    """
+    import asyncio
+
+    # Validate file type - same as regular transcribe
+    valid_types = [
+        "audio/wav",
+        "audio/mp3",
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/flac",
+        "audio/x-m4a",
+        "audio/x-wav",
+        "application/octet-stream",
+    ]
+    valid_extensions = [".wav", ".mp3", ".m4a", ".flac"]
+
+    file_extension = os.path.splitext(file.filename)[1].lower()
+
+    if file.content_type not in valid_types and file_extension not in valid_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid format. File type {file.content_type} or extension {file_extension} not supported. Supported: WAV, MP3, M4A, FLAC",
+        )
+
+    # Read file content
+    file_content = await file.read()
+    await file.seek(0)
+
+    # Check if file is empty
+    if len(file_content) == 0:
+        raise HTTPException(status_code=400, detail="File is empty")
+
+    # Check file size
+    if len(file_content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)}MB")
+
+    # Validate audio file format
+    from backend.file_validator import validate_audio_file
+
+    is_test_env = os.getenv("TESTING", "false").lower() == "true"
+    is_valid, message, audio_format = validate_audio_file(
+        file_content, file.filename, max_size=MAX_FILE_SIZE, allow_test_files=is_test_env
+    )
+
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=message)
+
+    # Save uploaded file to temporary location
+    try:
+        suffix = os.path.splitext(file.filename)[1] or ".wav"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            temp_file_path = tmp.name
+            tmp.write(file_content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not save uploaded file: {e}")
+
+    # Detect audio duration for upfront cost estimation
+    audio_duration = None
+    initial_cost_estimate = 0.0
+    try:
+        from backend.audio_utils import get_audio_duration
+        audio_duration = get_audio_duration(temp_file_path)
+        initial_cost_estimate = calculate_cost(provider, audio_duration)
+        logger.info(f"Detected audio duration: {audio_duration:.2f}s, initial cost estimate: ${initial_cost_estimate:.4f}")
+    except Exception as e:
+        logger.warning(f"Could not detect audio duration for cost estimation: {e}")
+        # Continue without duration - will be calculated later
+        audio_duration = None
+        initial_cost_estimate = 0.0
+
+    # Create job in manager with duration and cost estimate
+    job_id = job_manager.create_job(
+        user_id=current_user.id,
+        filename=file.filename,
+        provider=provider,
+        duration=audio_duration,
+        initial_cost_estimate=initial_cost_estimate
+    )
+    async def run_transcription_task():
+        """Background task to process transcription and update progress."""
+        try:
+            # Update to uploading status
+            job_manager.update_progress(
+                job_id=job_id,
+                progress=10,
+                status=JobStatus.UPLOADING,
+                current_step="Uploading file to cloud storage",
+                cost_estimate=0.0
+            )
+
+            # Process transcription (AWS only for now)
+            if provider == CloudProvider.AWS.value:
+                # Use the modified wait_for_job_completion with job_manager
+                result = await process_aws_transcription_async(
+                    temp_file_path, file.filename, language, enable_diarization,
+                    max_speakers, current_user, job_id
+                )
+
+                # Update to completed status
+                job_manager.update_progress(
+                    job_id=job_id,
+                    progress=100,
+                    status=JobStatus.COMPLETED,
+                    current_step="Transcription completed",
+                    cost_estimate=result.get("cost_estimate", 0.0)
+                )
+
+                # Store in database
+                transcription_manager.save_transcription(
+                    filename=file.filename,
+                    provider=provider,
+                    language=language,
+                    transcript=result.get("transcript", ""),
+                    speakers=result.get("speakers", []),
+                    enable_diarization=enable_diarization,
+                    max_speakers=max_speakers,
+                    duration=result.get("duration", 0),
+                    cost_estimate=result.get("cost_estimate", 0.0),
+                    file_size=len(file_content),
+                    audio_file_id=None,
+                    user_id=current_user.id,
+                )
+            else:
+                raise Exception(f"Provider {provider} not yet supported for async transcription")
+
+        except Exception as e:
+            logger.error(f"Async transcription error for job {job_id}: {e}")
+            job_manager.update_progress(
+                job_id=job_id,
+                progress=0,
+                status=JobStatus.FAILED,
+                current_step=f"Error: {str(e)}",
+                cost_estimate=0.0
+            )
+        finally:
+            # Clean up temporary file
+            try:
+                os.remove(temp_file_path)
+            except OSError:
+                pass
+
+    # Start background task
+    asyncio.create_task(run_transcription_task())
+
+    # Return job_id immediately
+    return {"job_id": job_id, "status": "started"}
+
+
 async def process_aws_transcription(
-    file_path: str, filename: str, language: str, enable_diarization: bool, max_speakers: Optional[int]
+    file_path: str, filename: str, language: str, enable_diarization: bool, max_speakers: Optional[int], current_user: UserDB
 ) -> Dict[str, Any]:
     """Process transcription using AWS Transcribe"""
     # Get API keys from database
@@ -311,49 +486,74 @@ async def process_aws_transcription(
             missing.append("s3_bucket_name")
         raise HTTPException(status_code=400, detail=f"AWS missing required fields: {', '.join(missing)}")
 
-    # Set AWS credentials
-    os.environ["AWS_ACCESS_KEY_ID"] = keys["access_key_id"]
-    os.environ["AWS_SECRET_ACCESS_KEY"] = keys["secret_access_key"]
-    if keys.get("region"):
-        os.environ["AWS_DEFAULT_REGION"] = keys["region"]
+    # Initialize AWS service with credentials from database
+    from backend.cloud_wrappers import get_aws_service
+    import sys
+
+    sys.stderr.write(f"[PROCESS_AWS] About to call get_aws_service\n")
+    sys.stderr.write(f"[PROCESS_AWS] Access key from DB: {keys['access_key_id'][:8]}...{keys['access_key_id'][-4:]}\n")
+    sys.stderr.write(f"[PROCESS_AWS] Secret key length: {len(keys['secret_access_key'])} chars\n")
+    sys.stderr.write(f"[PROCESS_AWS] Secret starts with gAAAAA: {keys['secret_access_key'].startswith('gAAAAA')}\n")
+    sys.stderr.flush()
+
+    service = get_aws_service(
+        access_key_id=keys["access_key_id"],
+        secret_access_key=keys["secret_access_key"],
+        region=keys.get("region", "us-east-1")
+    )
+
+    sys.stderr.write(f"[PROCESS_AWS] Service created successfully\n")
+    sys.stderr.flush()
 
     # Get S3 bucket name from configuration
     s3_bucket_name = keys.get("s3_bucket_name")
     if not s3_bucket_name:
         raise HTTPException(status_code=400, detail="AWS S3 bucket name is not configured")
 
-    # Upload to S3
+    # Upload to S3 with user_id prefix
     logger.info(f"Attempting to upload to S3 bucket: {s3_bucket_name}")
-    upload_result = aws_service.upload_file_to_s3(file_path, s3_bucket_name, filename)
+    s3_key = f"{current_user.id}/{filename}"
+    upload_result = service.upload_file_to_s3(file_path, s3_bucket_name, s3_key)
     logger.debug(f"Upload result: {upload_result}")
 
-    # upload_file_to_s3 always returns a tuple (success, actual_bucket_name)
-    upload_success, actual_bucket_name = upload_result
-
-    if not upload_success:
+    # Verify upload succeeded
+    if not upload_result.startswith("s3://"):
         raise Exception("Failed to upload file to S3")
 
-    # Use the actual bucket name (might be different if original was taken)
-    bucket_name = actual_bucket_name
-
     # Start transcription job
-    job_name = f"speecher-{uuid.uuid4()}"
+    job_name = f"speacher-{uuid.uuid4()}"
 
-    trans_resp = aws_service.start_transcription_job(
+    # Use the S3 URI from upload result (includes user_id prefix)
+    media_file_uri = upload_result
+
+    # Determine media format from filename extension
+    media_format = os.path.splitext(filename)[1].lstrip('.')
+    if media_format == 'm4a':
+        media_format = 'mp4'  # AWS Transcribe doesn't support m4a
+
+    # Build settings for speaker diarization
+    settings = {}
+    if enable_diarization and max_speakers:
+        settings = {
+            "ShowSpeakerLabels": True,
+            "MaxSpeakerLabels": max_speakers
+        }
+
+    trans_resp = service.start_transcription_job(
         job_name=job_name,
-        bucket_name=bucket_name,
-        object_key=filename,
+        media_file_uri=media_file_uri,
+        media_format=media_format,
         language_code=language,
-        max_speakers=max_speakers if enable_diarization else 1,
+        settings=settings,
     )
     if not trans_resp:
         raise Exception("Failed to start AWS transcription job")
 
     # Wait for completion
-    job_info = aws_service.wait_for_job_completion(job_name)
+    job_info = service.wait_for_job_completion(job_name)
     if not job_info:
         # Try to get more details about the failure
-        status_info = aws_service.get_transcription_job_status(job_name)
+        status_info = service.get_transcription_job_status(job_name)
         if status_info and status_info.get("TranscriptionJob"):
             job_status = status_info.get("TranscriptionJob", {})
             failure_reason = job_status.get("FailureReason", "Unknown")
@@ -364,17 +564,18 @@ async def process_aws_transcription(
         raise Exception("AWS transcription job failed - unable to get job details")
 
     # Download and process result
-    if not job_info or "TranscriptionJob" not in job_info:
+    if not job_info:
         raise Exception("Job info is missing or invalid")
 
-    if "Transcript" not in job_info["TranscriptionJob"]:
+    # job_info is already the TranscriptionJob object (returned by wait_for_job_completion)
+    if "Transcript" not in job_info:
         raise Exception(
-            f"No transcript found in job. Job status: {job_info['TranscriptionJob'].get('TranscriptionJobStatus')}"
+            f"No transcript found in job. Job status: {job_info.get('TranscriptionJobStatus')}"
         )
 
-    transcript_uri = job_info["TranscriptionJob"]["Transcript"]["TranscriptFileUri"]
+    transcript_uri = job_info["Transcript"]["TranscriptFileUri"]
     logger.info(f"Downloading from URI: {transcript_uri}")
-    transcription_data = aws_service.download_transcription_result(transcript_uri)
+    transcription_data = service.download_transcription_result(transcript_uri)
 
     if transcription_data is None:
         raise Exception("Failed to download transcription result from AWS")
@@ -385,11 +586,112 @@ async def process_aws_transcription(
     result = process_transcription_data(transcription_data, enable_diarization)
     logger.debug(f"Processed result: {result}")
 
-    # Clean up S3
-    try:
-        aws_service.delete_file_from_s3(bucket_name, filename)
-    except Exception:
-        pass
+    # NOTE: S3 files are now preserved for user management
+    # Users can delete files via the /files endpoint
+
+    return result
+
+
+async def process_aws_transcription_async(
+    file_path: str, filename: str, language: str, enable_diarization: bool,
+    max_speakers: Optional[int], current_user: UserDB, job_id: str
+) -> Dict[str, Any]:
+    """Process transcription using AWS Transcribe with progress updates.
+
+    This is an async version that updates job progress during transcription.
+    """
+    # Get API keys from database
+    api_keys = api_keys_manager.get_api_keys("aws")
+    if not api_keys:
+        raise HTTPException(status_code=400, detail="AWS provider is not configured")
+
+    keys = api_keys.get("keys", {})
+
+    if not keys.get("access_key_id") or not keys.get("secret_access_key") or not keys.get("s3_bucket_name"):
+        missing = []
+        if not keys.get("access_key_id"):
+            missing.append("access_key_id")
+        if not keys.get("secret_access_key"):
+            missing.append("secret_access_key")
+        if not keys.get("s3_bucket_name"):
+            missing.append("s3_bucket_name")
+        raise HTTPException(status_code=400, detail=f"AWS missing required fields: {', '.join(missing)}")
+
+    # Initialize AWS service with credentials from database
+    from backend.cloud_wrappers import get_aws_service
+
+    service = get_aws_service(
+        access_key_id=keys["access_key_id"],
+        secret_access_key=keys["secret_access_key"],
+        region=keys.get("region", "us-east-1")
+    )
+
+    # Get S3 bucket name from configuration
+    s3_bucket_name = keys.get("s3_bucket_name")
+    if not s3_bucket_name:
+        raise HTTPException(status_code=400, detail="AWS S3 bucket name is not configured")
+
+    # Upload to S3 with user_id prefix
+    logger.info(f"Attempting to upload to S3 bucket: {s3_bucket_name}")
+    s3_key = f"{current_user.id}/{filename}"
+    upload_result = service.upload_file_to_s3(file_path, s3_bucket_name, s3_key)
+
+    # Verify upload succeeded
+    if not upload_result.startswith("s3://"):
+        raise Exception("Failed to upload file to S3")
+
+    # Start transcription job
+    job_name = f"speacher-{uuid.uuid4()}"
+
+    # Use the S3 URI from upload result (includes user_id prefix)
+    media_file_uri = upload_result
+
+    # Determine media format from filename extension
+    media_format = os.path.splitext(filename)[1].lstrip('.')
+    if media_format == 'm4a':
+        media_format = 'mp4'  # AWS Transcribe doesn't support m4a
+
+    # Build settings for speaker diarization
+    settings = {}
+    if enable_diarization and max_speakers:
+        settings = {
+            "ShowSpeakerLabels": True,
+            "MaxSpeakerLabels": max_speakers
+        }
+
+    trans_resp = service.start_transcription_job(
+        job_name=job_name,
+        media_file_uri=media_file_uri,
+        media_format=media_format,
+        language_code=language,
+        settings=settings,
+    )
+    if not trans_resp:
+        raise Exception("Failed to start AWS transcription job")
+
+    # Wait for completion with job_manager for progress updates
+    job_info = service.wait_for_job_completion(
+        job_name=job_name,
+        job_manager=job_manager,
+        job_id=job_id
+    )
+
+    if not job_info:
+        status_info = service.get_transcription_job_status(job_name)
+        if status_info and status_info.get("TranscriptionJob"):
+            raise Exception(
+                f"No transcript found in job. Job status: {status_info.get('TranscriptionJobStatus')}"
+            )
+
+    transcript_uri = job_info["Transcript"]["TranscriptFileUri"]
+    logger.info(f"Downloading from URI: {transcript_uri}")
+    transcription_data = service.download_transcription_result(transcript_uri)
+
+    if transcription_data is None:
+        raise Exception("Failed to download transcription result from AWS")
+
+    # Process with speaker diarization
+    result = process_transcription_data(transcription_data, enable_diarization)
 
     return result
 
@@ -498,72 +800,73 @@ async def get_transcription_history(
     date_from: Optional[str] = Query(None),
     provider: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
+    current_user: UserDB = Depends(require_auth),
 ) -> List[Dict[str, Any]]:
     """
-    Get transcription history with optional filtering.
+    Get transcription history for the authenticated user with optional filtering.
     """
-    query = {}
+    logger.info(f"DATABASE_URL being used: {os.getenv('DATABASE_URL', 'NOT_SET')}")
 
-    if search:
-        query["filename"] = {"$regex": search, "$options": "i"}
-
+    # Convert date_from string to datetime if provided
+    date_from_dt = None
     if date_from:
-        query["created_at"] = {"$gte": datetime.datetime.fromisoformat(date_from)}
+        try:
+            date_from_dt = datetime.datetime.fromisoformat(date_from)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use ISO format: YYYY-MM-DD")
 
-    if provider:
-        query["provider"] = provider
-
-    # Fetch from MongoDB
-    try:
-        cursor = collection.find(query).sort("created_at", -1).limit(limit)
-
-        results = []
-        for doc in cursor:
-            doc["id"] = str(doc["_id"])
-            doc.pop("_id", None)
-            # Convert datetime to ISO format
-            if "created_at" in doc:
-                doc["created_at"] = doc["created_at"].isoformat()
-            results.append(doc)
-
-        return results
-    except Exception as e:
-        # Return empty list if MongoDB is not available
-        logger.warning(f"MongoDB error in history endpoint: {e}")
-        return []
+    # Fetch from PostgreSQL for the authenticated user
+    logger.info(f"Fetching transcription history for user {current_user.id} with limit={limit}")
+    result = transcription_manager.get_transcription_history(
+        limit=limit,
+        search=search,
+        date_from=date_from_dt,
+        provider=provider,
+        user_id=current_user.id,
+    )
+    logger.info(f"Returning {len(result)} transcriptions")
+    return result
 
 
 @app.get("/transcription/{transcription_id}")
-async def get_transcription(transcription_id: str) -> Dict[str, Any]:
-    """Get a specific transcription by ID."""
-    try:
-        object_id = ObjectId(transcription_id)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Invalid transcription ID")
+async def get_transcription(
+    transcription_id: str,
+    current_user: UserDB = Depends(require_auth),
+) -> Dict[str, Any]:
+    """Get a specific transcription by ID (user must own it)."""
+    result = transcription_manager.get_transcription_by_id(transcription_id)
 
-    doc = collection.find_one({"_id": object_id})
-    if not doc:
+    if not result:
         raise HTTPException(status_code=404, detail="Transcription not found")
 
-    doc["id"] = str(doc["_id"])
-    doc.pop("_id", None)
-    if "created_at" in doc:
-        doc["created_at"] = doc["created_at"].isoformat()
+    # Verify ownership
+    if result.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not have permission to access this transcription")
 
-    return doc
+    return result
 
 
 @app.delete("/transcription/{transcription_id}")
-async def delete_transcription(transcription_id: str):
-    """Delete a transcription by ID."""
-    try:
-        object_id = ObjectId(transcription_id)
-    except Exception:
-        raise HTTPException(status_code=404, detail="Invalid transcription ID")
+async def delete_transcription(
+    transcription_id: str,
+    current_user: UserDB = Depends(require_auth),
+):
+    """Delete a transcription by ID (user must own it)."""
+    # First, get the transcription to verify ownership
+    result = transcription_manager.get_transcription_by_id(transcription_id)
 
-    result = collection.delete_one({"_id": object_id})
-    if result.deleted_count == 0:
+    if not result:
         raise HTTPException(status_code=404, detail="Transcription not found")
+
+    # Verify ownership
+    if result.get("user_id") != current_user.id:
+        raise HTTPException(status_code=403, detail="You do not have permission to delete this transcription")
+
+    # Delete the transcription
+    success = transcription_manager.delete_transcription(transcription_id)
+
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete transcription")
 
     return {"message": "Transcription deleted successfully"}
 
@@ -571,7 +874,7 @@ async def delete_transcription(transcription_id: str):
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
-    return {"status": "healthy", "service": "Speecher API"}
+    return {"status": "healthy", "service": "Speacher API"}
 
 
 @app.get("/debug/aws-config")
@@ -603,11 +906,16 @@ async def debug_aws_config():
 
 @app.get("/db/health")
 async def database_health():
-    """Check MongoDB connection."""
+    """Check PostgreSQL connection."""
     try:
-        # Ping MongoDB
-        mongo_client.admin.command("ping")
-        return {"status": "healthy", "database": "MongoDB connected"}
+        # Test database connection
+        from backend.transcriptions_db import engine
+        from sqlalchemy import text
+
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+
+        return {"status": "healthy", "database": "PostgreSQL connected"}
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Database unhealthy: {e}")
 
@@ -618,41 +926,324 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     await handle_websocket_streaming(websocket, client_id)
 
 
+@app.websocket("/ws/transcribe/{job_id}")
+async def transcribe_websocket(websocket: WebSocket, job_id: str):
+    """WebSocket endpoint for real-time transcription progress updates.
+
+    Clients connect to this endpoint with a job_id to receive
+    real-time progress updates as the transcription job progresses.
+    """
+    await websocket.accept()
+
+    try:
+        # Send initial status
+        job = job_manager.get_job_status(job_id)
+        if not job:
+            await websocket.send_json({"error": "Job not found"})
+            await websocket.close()
+            return
+
+        await websocket.send_json(job)
+
+        # Poll for updates every 500ms
+        import asyncio
+        last_update = job.get("updated_at", 0)
+
+        while True:
+            # Check if client disconnected
+            try:
+                await websocket.receive_text()
+            except Exception:
+                # Client disconnected
+                break
+
+            # Get current job status
+            current_job = job_manager.get_job_status(job_id)
+
+            if not current_job:
+                await websocket.send_json({"error": "Job not found"})
+                break
+
+            # Send update if status changed
+            if current_job.get("updated_at", 0) > last_update:
+                await websocket.send_json(current_job)
+                last_update = current_job.get("updated_at", 0)
+
+            # Check if job is complete or failed
+            if current_job["status"] in [JobStatus.COMPLETED, JobStatus.FAILED]:
+                # Send final update
+                await websocket.send_json(current_job)
+                break
+
+            await asyncio.sleep(0.5)  # Poll every 500ms
+
+    except Exception as e:
+        logger.error(f"WebSocket error for job {job_id}: {e}")
+        await websocket.send_json({"error": str(e)})
+    finally:
+        await websocket.close()
+
+
 @app.get("/stats")
 async def get_statistics():
     """Get usage statistics."""
-    try:
-        total_count = collection.count_documents({})
+    return transcription_manager.get_statistics()
 
-        # Aggregate by provider
-        provider_stats = list(
-            collection.aggregate(
-                [
-                    {
-                        "$group": {
-                            "_id": "$provider",
-                            "count": {"$sum": 1},
-                            "total_duration": {"$sum": "$duration"},
-                            "total_cost": {"$sum": "$cost_estimate"},
-                        }
-                    }
-                ]
-            )
+
+@app.get("/files")
+async def list_s3_files(
+    # Tymczasowo bez Depends(require_auth) - testujemy funkcjonalność
+    authorization: str = Header(None, alias="Authorization"),
+):
+    """List all files in S3 bucket for the authenticated user."""
+    # Debug log
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.warning(f"DEBUG: authorization = {authorization}")
+
+    if not authorization or authorization == "None":
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Pobierz token z nagłówka
+    token = authorization.replace("Bearer ", "")
+
+    # Pobierz user email z tokena
+    try:
+        from src.backend.auth import decode_token
+        payload = decode_token(token)
+        email = payload.get("sub")
+
+        if not email:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        from src.backend.users_db import user_db
+        user = await user_db.get_user_by_email(email)
+
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+
+        current_user = user
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
+    try:
+        # Get AWS keys from database
+        api_keys = api_keys_manager.get_api_keys("aws")
+        if not api_keys:
+            raise HTTPException(status_code=400, detail="AWS provider is not configured")
+
+        keys = api_keys.get("keys", {})
+        s3_bucket_name = keys.get("s3_bucket_name")
+
+        if not s3_bucket_name:
+            raise HTTPException(status_code=400, detail="AWS S3 bucket name is not configured")
+
+        # Initialize AWS service
+        from backend.cloud_wrappers import get_aws_service
+        service = get_aws_service(
+            access_key_id=keys["access_key_id"],
+            secret_access_key=keys["secret_access_key"],
+            region=keys.get("region", "us-east-1")
         )
 
-        # Recent activity
-        recent = collection.find().sort("created_at", -1).limit(5)
-        recent_files = [doc["filename"] for doc in recent]
+        # List files with user_id prefix filter
+        user_prefix = f"{current_user.id}/"
+        files = service.list_s3_files(s3_bucket_name, prefix=user_prefix)
+
+        # Get transcription count for each file
+        files_with_counts = []
+        for file_info in files:
+            # Remove user_id prefix from filename for display
+            filename = file_info['key'].replace(user_prefix, "", 1)
+
+            # Count transcriptions for this file
+            transcriptions = transcription_manager.get_transcription_history(
+                search=filename,
+                limit=1000,
+                user_id=current_user.id
+            )
+            # Filter for exact filename match
+            exact_matches = [t for t in transcriptions if t.get('filename') == filename]
+
+            files_with_counts.append({
+                **file_info,
+                'key': filename,  # Return filename without user prefix
+                'transcription_count': len(exact_matches)
+            })
+
+        return {"files": files_with_counts}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to list S3 files: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+
+
+@app.delete("/files/{filename}")
+async def delete_s3_file(
+    filename: str,
+    current_user: UserDB = Depends(require_auth),
+):
+    """Delete a file from S3 bucket (user must own the file)."""
+    try:
+        # Get AWS keys from database
+        api_keys = api_keys_manager.get_api_keys("aws")
+        if not api_keys:
+            raise HTTPException(status_code=400, detail="AWS provider is not configured")
+
+        keys = api_keys.get("keys", {})
+        s3_bucket_name = keys.get("s3_bucket_name")
+
+        if not s3_bucket_name:
+            raise HTTPException(status_code=400, detail="AWS S3 bucket name is not configured")
+
+        # Add user_id prefix to filename for S3
+        s3_key = f"{current_user.id}/{filename}"
+
+        # Initialize AWS service
+        from backend.cloud_wrappers import get_aws_service
+        service = get_aws_service(
+            access_key_id=keys["access_key_id"],
+            secret_access_key=keys["secret_access_key"],
+            region=keys.get("region", "us-east-1")
+        )
+
+        # Delete file from S3
+        success = service.delete_file_from_s3(s3_bucket_name, s3_key)
+
+        if success:
+            return {"message": f"File '{filename}' deleted successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to delete file")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete S3 file: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
+
+
+@app.post("/files/{filename}/retranscribe")
+async def retranscribe_file(
+    filename: str,
+    language: str = Form("en-US"),
+    enable_diarization: bool = Form(True),
+    max_speakers: Optional[int] = Form(4),
+    current_user: UserDB = Depends(require_auth),
+):
+    """Re-transcribe an existing S3 file."""
+    try:
+        # Get AWS keys from database
+        api_keys = api_keys_manager.get_api_keys("aws")
+        if not api_keys:
+            raise HTTPException(status_code=400, detail="AWS provider is not configured")
+
+        keys = api_keys.get("keys", {})
+
+        if not keys.get("access_key_id") or not keys.get("secret_access_key") or not keys.get("s3_bucket_name"):
+            raise HTTPException(status_code=400, detail="AWS credentials or bucket not configured")
+
+        # Initialize AWS service
+        from backend.cloud_wrappers import get_aws_service
+        service = get_aws_service(
+            access_key_id=keys["access_key_id"],
+            secret_access_key=keys["secret_access_key"],
+            region=keys.get("region", "us-east-1")
+        )
+
+        s3_bucket_name = keys.get("s3_bucket_name")
+        # File was stored with user_id prefix, need to add it back
+        media_file_uri = f"s3://{s3_bucket_name}/{current_user.id}/{filename}"
+
+        # Determine media format from filename extension
+        import os
+        media_format = os.path.splitext(filename)[1].lstrip('.')
+        if media_format == 'm4a':
+            media_format = 'mp4'
+
+        # Start transcription job
+        job_name = f"speacher-retranscribe-{uuid.uuid4()}"
+
+        # Build settings for speaker diarization
+        settings = {}
+        if enable_diarization and max_speakers:
+            settings = {
+                "ShowSpeakerLabels": True,
+                "MaxSpeakerLabels": max_speakers
+            }
+
+        # Start transcription
+        trans_resp = service.start_transcription_job(
+            job_name=job_name,
+            media_file_uri=media_file_uri,
+            media_format=media_format,
+            language_code=language,
+            settings=settings,
+        )
+
+        if not trans_resp:
+            raise Exception("Failed to start AWS transcription job")
+
+        # Wait for completion
+        job_info = service.wait_for_job_completion(job_name)
+        if not job_info:
+            raise Exception("AWS transcription job failed")
+
+        # Download result
+        if "Transcript" not in job_info:
+            raise Exception("No transcript found in job")
+
+        transcript_uri = job_info["Transcript"]["TranscriptFileUri"]
+        transcription_data = service.download_transcription_result(transcript_uri)
+
+        if transcription_data is None:
+            raise Exception("Failed to download transcription result")
+
+        # Process transcription data
+        result = process_transcription_data(transcription_data, enable_diarization)
+
+        # Extract transcript text and speakers
+        transcript_text = result.get("transcript", "")
+        speakers = []
+
+        if enable_diarization and result.get("speakers"):
+            speakers = result["speakers"]
+
+        # Calculate duration and cost
+        duration = result.get("duration", 0)
+        cost_estimate = calculate_cost("aws", duration)
+
+        # Store in PostgreSQL
+        doc_id = transcription_manager.save_transcription(
+            filename=filename,
+            provider="aws",
+            language=language,
+            transcript=transcript_text,
+            speakers=speakers,
+            enable_diarization=enable_diarization,
+            max_speakers=max_speakers,
+            duration=duration,
+            cost_estimate=cost_estimate,
+            file_size=0,  # File size unknown for re-transcription
+            audio_file_id=None,
+            user_id=current_user.id,  # Authenticated user
+        )
 
         return {
-            "total_transcriptions": total_count,
-            "provider_statistics": provider_stats,
-            "recent_files": recent_files,
+            "id": doc_id,
+            "transcript": transcript_text,
+            "speakers": speakers,
+            "provider": "aws",
+            "language": language,
+            "duration": duration,
+            "cost_estimate": cost_estimate,
         }
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning(f"MongoDB error in stats endpoint: {e}")
-        # Return default stats if MongoDB is not available
-        return {"total_transcriptions": 0, "provider_statistics": [], "recent_files": []}
+        logger.error(f"Failed to re-transcribe file: {e}")
+        raise HTTPException(status_code=500, detail=f"Re-transcription failed: {str(e)}")
 
 
 def process_transcription_data(transcription_data: Dict[str, Any], enable_diarization: bool) -> Dict[str, Any]:
@@ -685,7 +1276,7 @@ def process_transcription_data(transcription_data: Dict[str, Any], enable_diariz
         # Process speaker diarization if enabled
         if enable_diarization and "speaker_labels" in results:
             # Use transcription module to properly process speaker segments
-            from speecher import transcription
+            from speacher import transcription
 
             # Process the full transcription data with speaker segments
             processed_segments = []
@@ -798,7 +1389,7 @@ class APIKeyRequest(BaseModel):
     keys: Dict[str, Any]
 
 
-@app.post("/api/keys/{provider}")
+@app.post("/keys/{provider}")
 async def save_api_keys(provider: str, request: APIKeyRequest):
     """Save or update API keys for a provider."""
     success = api_keys_manager.save_api_keys(provider, request.keys)
@@ -808,7 +1399,7 @@ async def save_api_keys(provider: str, request: APIKeyRequest):
         raise HTTPException(status_code=500, detail="Failed to save API keys")
 
 
-@app.get("/api/keys/{provider}")
+@app.get("/keys/{provider}")
 async def get_api_keys(provider: str):
     """Get API keys for a provider (masked for security)."""
     keys_data = api_keys_manager.get_api_keys(provider)
@@ -835,13 +1426,13 @@ async def get_api_keys(provider: str):
         return {"provider": provider, "keys": {}, "enabled": False, "configured": False}
 
 
-@app.get("/api/keys")
+@app.get("/keys")
 async def get_all_providers():
     """Get all providers with their configuration status."""
     return api_keys_manager.get_all_providers()
 
 
-@app.delete("/api/keys/{provider}")
+@app.delete("/keys/{provider}")
 async def delete_api_keys(provider: str):
     """Delete API keys for a provider."""
     success = api_keys_manager.delete_api_keys(provider)
@@ -851,7 +1442,7 @@ async def delete_api_keys(provider: str):
         raise HTTPException(status_code=404, detail="Provider not found")
 
 
-@app.put("/api/keys/{provider}/toggle")
+@app.put("/keys/{provider}/toggle")
 async def toggle_provider(provider: str, enabled: bool = True):
     """Enable or disable a provider."""
     success = api_keys_manager.toggle_provider(provider, enabled)

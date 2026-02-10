@@ -78,7 +78,7 @@ uv run python -m src.speecher.cli --audio-file audio.wav --language pl-PL
 # Install dependencies locally with uv
 uv pip install -e .
 
-# Then run with docker-compose (uses installed packages)
+# Then run with docker compose (uses installed packages)
 docker compose up
 ```
 

@@ -1,13 +1,13 @@
-# Speecher
+# Speacher
 
-Speecher is a tool for transcribing WAV audio files using cloud speech-to-text services (AWS, Azure, GCP). It offers:
+Speacher is a tool for transcribing WAV audio files using cloud speech-to-text services (AWS, Azure, GCP). It offers:
 - A command-line interface (CLI) (AWS Transcribe by default)
 - A FastAPI backend service to upload WAV files, transcribe via AWS Transcribe, and store results in MongoDB
 
 ## Project Structure
 ```
 /
-├── speecher/         # Core modules for AWS, Azure, GCP, and transcription processing
+├── speacher/         # Core modules for AWS, Azure, GCP, and transcription processing
 ├── backend/          # FastAPI application (upload + transcription + MongoDB)
 └── tests/            # Unit tests for backend API
 ```
@@ -29,12 +29,12 @@ Speecher is a tool for transcribing WAV audio files using cloud speech-to-text s
 ## CLI Usage (AWS Transcribe)
 The CLI entrypoint is in `speecher/cli.py`. You can run:
 ```bash
-python -m speecher.cli [OPTIONS]
+python -m speacher.cli [OPTIONS]
 ```
 
 Run `--help` for all options:
 ```bash
-python -m speecher.cli --help
+python -m speacher.cli --help
 ```
 Key options:
 - `--audio-file` PATH         Path to input `.wav` file (default: `audio.wav`)
@@ -49,7 +49,7 @@ Key options:
 
 Example:
 ```bash
-python -m speecher.cli \
+python -m speacher.cli \
   --audio-file meeting.wav \
   --bucket-name my-transcribe-bucket \
   --language en-US \
@@ -65,7 +65,7 @@ Set environment variables:
 ```bash
 export S3_BUCKET_NAME=<your-s3-bucket>
 export MONGODB_URI="mongodb://localhost:27017"
-export MONGODB_DB="speecher"
+export MONGODB_DB="speacher"
 export MONGODB_COLLECTION="transcriptions"
 ```
 

@@ -14,19 +14,20 @@ import {
 } from '@mui/material';
 import {
   Mic as MicIcon,
-  Stop as StopIcon,
-  PlayArrow as PlayIcon,
+  Square as StopIcon,
+  Play as PlayIcon,
   Pause as PauseIcon,
   Download as DownloadIcon,
-  Delete as DeleteIcon,
-  CloudUpload as UploadIcon,
-  FiberManualRecord as RecordIcon
-} from '@mui/icons-material';
+  Trash2 as DeleteIcon,
+  Upload as UploadIcon,
+  Circle as RecordIcon
+} from 'lucide-react';
 import WaveSurfer from 'wavesurfer.js';
 import AudioVisualizer from './AudioVisualizer';
 import { convertWebMToWav } from '../utils/audioConverter';
+import TranscriptionProgress from './TranscriptionProgress';
 
-const AudioRecorder = ({ onAudioRecorded, isLoading, settings }) => {
+const AudioRecorder = ({ onAudioRecorded, isLoading, settings, currentJob, onJobComplete, onJobError }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [audioBlob, setAudioBlob] = useState(null);
   const [audioUrl, setAudioUrl] = useState(null);
@@ -207,17 +208,28 @@ const AudioRecorder = ({ onAudioRecorded, isLoading, settings }) => {
     <Card elevation={2}>
       <CardContent>
         <Typography variant="h5" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <MicIcon color="primary" />
+          <MicIcon className="text-blue-600" size={24} />
           Audio Recorder
         </Typography>
-        
+
+        {/* Show TranscriptionProgress when there's an active job */}
+        {currentJob && onJobComplete && onJobError && (
+          <Box sx={{ mt: 3 }}>
+            <TranscriptionProgress
+              jobId={currentJob.id}
+              onComplete={onJobComplete}
+              onError={onJobError}
+            />
+          </Box>
+        )}
+
         <Box sx={{ mt: 3 }}>
           {!isRecording && !audioBlob && (
             <Box sx={{ textAlign: 'center', py: 4 }}>
               <Button
                 variant="contained"
                 size="large"
-                startIcon={<MicIcon />}
+                startIcon={<MicIcon size={20} />}
                 onClick={startRecording}
                 disabled={isLoading}
                 sx={{
@@ -246,7 +258,7 @@ const AudioRecorder = ({ onAudioRecorded, isLoading, settings }) => {
                   variant="contained"
                   color="error"
                   size="large"
-                  startIcon={<StopIcon />}
+                  startIcon={<StopIcon size={20} />}
                   onClick={stopRecording}
                   sx={{ borderRadius: 3, px: 4, py: 1.5 }}
                 >
@@ -254,7 +266,7 @@ const AudioRecorder = ({ onAudioRecorded, isLoading, settings }) => {
                 </Button>
                 
                 <Chip
-                  icon={<RecordIcon sx={{ color: 'error.main', animation: 'pulse 1.5s infinite' }} />}
+                  icon={<RecordIcon className="text-red-500 animate-pulse" size={16} />}
                   label={formatDuration(duration)}
                   color="error"
                   variant="outlined"
@@ -300,7 +312,7 @@ const AudioRecorder = ({ onAudioRecorded, isLoading, settings }) => {
                     }
                   }}
                 >
-                  {isPlaying ? <PauseIcon /> : <PlayIcon />}
+                  {isPlaying ? <PauseIcon size={24} /> : <PlayIcon size={24} />}
                 </IconButton>
                 
                 <Chip 
@@ -312,19 +324,19 @@ const AudioRecorder = ({ onAudioRecorded, isLoading, settings }) => {
                 
                 <Tooltip title="Download recording">
                   <IconButton color="primary" onClick={downloadRecording}>
-                    <DownloadIcon />
+                    <DownloadIcon size={24} />
                   </IconButton>
                 </Tooltip>
                 
                 <Tooltip title="Delete recording">
                   <IconButton color="error" onClick={clearRecording}>
-                    <DeleteIcon />
+                    <DeleteIcon size={24} />
                   </IconButton>
                 </Tooltip>
                 
                 <Button
                   variant="contained"
-                  startIcon={<UploadIcon />}
+                  startIcon={<UploadIcon size={20} />}
                   onClick={submitForTranscription}
                   disabled={isLoading}
                   sx={{
