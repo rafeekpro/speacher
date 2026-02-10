@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { tokenStorage } from '../utils/tokenStorage';
+import { resetRefreshFailure } from '../utils/axiosInterceptors';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || '';
 
@@ -43,12 +44,15 @@ class AuthService {
     try {
       const response = await axios.post<AuthResponse>(`${API_BASE_URL}/api/auth/login`, credentials);
       const { access_token, refresh_token } = response.data;
-      
+
       tokenStorage.setAccessToken(access_token);
       if (refresh_token) {
         tokenStorage.setRefreshToken(refresh_token);
       }
-      
+
+      // Reset the refresh failure flag on successful login
+      resetRefreshFailure();
+
       return response.data;
     } catch (error: any) {
       if (error?.response?.data?.detail) {

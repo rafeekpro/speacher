@@ -7,8 +7,10 @@ interface CustomAxiosRequestConfig extends InternalAxiosRequestConfig {
   _skipAuthRefresh?: boolean;
 }
 
-// Flag to prevent infinite refresh attempts
+// Flags to prevent infinite refresh attempts
 let isRefreshing = false;
+let hasRefreshFailed = false; // Track permanent refresh failure
+
 interface QueuedPromise {
   resolve: (value?: any) => void;
   reject: (reason?: any) => void;
@@ -59,6 +61,15 @@ export const setupAxiosInterceptors = () => {
 
       // If we get a 401 and haven't already tried to refresh
       if (error.response?.status === 401 && !originalRequest._retry) {
+        // If refresh already failed permanently, immediately redirect to login
+        if (hasRefreshFailed) {
+          tokenStorage.clearTokens();
+          if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
+            window.location.href = '/login';
+          }
+          return Promise.reject(error);
+        }
+
         originalRequest._retry = true;
 
         const refreshToken = tokenStorage.getRefreshToken();
@@ -87,7 +98,8 @@ export const setupAxiosInterceptors = () => {
             // Retry the original request
             return axios.request(originalRequest);
           } catch (refreshError) {
-            // Refresh failed, clear tokens and process queue with error
+            // Refresh failed permanently - prevent any further refresh attempts
+            hasRefreshFailed = true;
             isRefreshing = false;
             tokenStorage.clearTokens();
             processQueue(refreshError, null);
@@ -101,6 +113,11 @@ export const setupAxiosInterceptors = () => {
           }
         } else if (isRefreshing) {
           // If already refreshing, add this request to the queue
+          // But if refresh already failed, immediately reject
+          if (hasRefreshFailed) {
+            return Promise.reject(new Error('Authentication refresh failed'));
+          }
+
           return new Promise((resolve, reject) => {
             failedQueue.push({ resolve, reject });
           }).then(token => {
@@ -131,4 +148,9 @@ export const setupAxiosInterceptors = () => {
     axios.interceptors.request.eject(requestInterceptor);
     axios.interceptors.response.eject(responseInterceptor);
   };
+};
+
+// Export function to reset refresh failure flag (call on successful login)
+export const resetRefreshFailure = () => {
+  hasRefreshFailed = false;
 };
