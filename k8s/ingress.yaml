@@ -1,0 +1,86 @@
+---
+# Ingress for Speecher Application
+# This manifest works with Traefik, NGINX, or other ingress controllers
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: speecher-ingress
+  namespace: speecher
+  labels:
+    app: speecher
+  annotations:
+    # Traefik specific annotations (uncomment if using Traefik)
+    # traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+    # traefik.ingress.kubernetes.io/router.tls: "true"
+    # traefik.ingress.kubernetes.io/router.tls.certresolver: "letsencrypt"
+
+    # NGINX Ingress annotations (uncomment if using NGINX)
+    # kubernetes.io/ingress.class: "nginx"
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    # nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+
+    # If using Traefik middleware (create middleware separately):
+    # traefik.ingress.kubernetes.io/router.middlewares: "speecher-redirect-scheme@kubernetescrd"
+spec:
+  # ingressClassName: traefik  # Uncomment and set to your ingress controller
+  rules:
+  # Frontend route
+  - host: speecher.local  # CHANGE THIS to your actual domain
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend
+            port:
+              number: 8080
+
+  # Backend API route
+  - host: speecher.local  # CHANGE THIS to your actual domain
+    http:
+      paths:
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: backend
+            port:
+              number: 8000
+      - path: /docs
+        pathType: Prefix
+        backend:
+          service:
+            name: backend
+            port:
+              number: 8000
+      - path: /health
+        pathType: Prefix
+        backend:
+          service:
+            name: backend
+            port:
+              number: 8000
+
+  # TLS configuration (uncomment if using TLS)
+  # tls:
+  # - hosts:
+  #   - speecher.local  # CHANGE THIS to your actual domain
+  #   secretName: speecher-tls  # Create this secret or let cert-manager create it
+
+---
+# OPTIONAL: Middleware for HTTP to HTTPS redirect (Traefik only)
+# Only create this if Traefik CRDs are installed in your cluster
+# Comment out this entire section if not using Traefik or if CRDs are not installed
+
+# apiVersion: traefik.containo.us/v1alpha1
+# kind: Middleware
+# metadata:
+#   name: redirect-scheme
+#   namespace: speecher
+# spec:
+#   redirectScheme:
+#     scheme: https
+#     permanent: true

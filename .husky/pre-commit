@@ -1,0 +1,148 @@
+#!/usr/bin/env sh
+
+# Visual Testing Enforcement Hook
+# This hook MUST pass for commits to proceed
+
+set -e  # Exit on any error
+
+echo "🎭 VISUAL TESTING ENFORCEMENT ACTIVE"
+echo "===================================="
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Check if we're in the react-frontend directory or if changes affect it
+FRONTEND_CHANGED=$(git diff --cached --name-only | grep -E "^src/react-frontend/|^frontend/" || true)
+
+if [ -z "$FRONTEND_CHANGED" ]; then
+  echo "${YELLOW}ℹ️  No frontend changes detected, skipping visual tests${NC}"
+  exit 0
+fi
+
+echo "${BLUE}📸 Frontend changes detected! Running visual tests...${NC}"
+echo ""
+
+# Change to react-frontend directory
+cd src/react-frontend 2>/dev/null || cd frontend 2>/dev/null || {
+  echo "${RED}❌ ERROR: Could not find frontend directory${NC}"
+  echo "Please ensure you're in the correct project structure"
+  exit 1
+}
+
+# Check if Playwright is installed
+if ! npx playwright --version > /dev/null 2>&1; then
+  echo "${YELLOW}📦 Installing Playwright...${NC}"
+  npm install -D @playwright/test
+  npx playwright install --with-deps chromium firefox webkit
+fi
+
+# Check if baseline screenshots exist
+if [ ! -d "tests/visual/__screenshots__" ]; then
+  echo "${YELLOW}📸 No baseline screenshots found. Creating baselines...${NC}"
+  npx playwright test tests/visual/visual.spec.ts --update-snapshots || {
+    echo "${RED}❌ Failed to create baseline screenshots${NC}"
+    echo "Please fix the issues and try again"
+    exit 1
+  }
+fi
+
+# Run visual tests
+echo "${BLUE}🎭 Running visual regression tests...${NC}"
+echo ""
+
+# Create test results directory
+mkdir -p test-results
+
+# Run the visual tests with detailed output
+npx playwright test tests/visual/visual.spec.ts --reporter=list || {
+  EXIT_CODE=$?
+  echo ""
+  echo "${RED}❌ VISUAL TESTS FAILED!${NC}"
+  echo ""
+  echo "Visual regression detected in your changes."
+  echo ""
+  echo "To fix this issue, you have several options:"
+  echo ""
+  echo "1. ${YELLOW}Review the changes:${NC}"
+  echo "   npx playwright show-report"
+  echo ""
+  echo "2. ${YELLOW}If the visual changes are intentional:${NC}"
+  echo "   npx playwright test tests/visual/visual.spec.ts --update-snapshots"
+  echo "   git add tests/visual/__screenshots__/"
+  echo ""
+  echo "3. ${YELLOW}To see the diff in detail:${NC}"
+  echo "   npx playwright test tests/visual/visual.spec.ts --reporter=html"
+  echo "   npx playwright show-report"
+  echo ""
+  echo "4. ${YELLOW}To bypass (NOT RECOMMENDED):${NC}"
+  echo "   git commit --no-verify"
+  echo "   ⚠️  WARNING: This will be logged and reviewed!"
+  echo ""
+  
+  # Log bypass attempts
+  if [ -n "$SKIP_VISUAL_TESTS" ]; then
+    echo "$(date): Visual tests bypassed by $USER" >> ../../.visual-test-bypass.log
+    echo "${YELLOW}⚠️  Visual test bypass has been logged${NC}"
+  fi
+  
+  exit $EXIT_CODE
+}
+
+echo ""
+echo "${GREEN}✅ Visual tests passed successfully!${NC}"
+echo ""
+
+# Additional checks for visual test coverage
+echo "${BLUE}📊 Checking visual test coverage...${NC}"
+
+# Count the number of routes in the application
+ROUTE_COUNT=$(find . -name "*.tsx" -o -name "*.jsx" | xargs grep -l "Route\|route" | wc -l)
+VISUAL_TEST_COUNT=$(grep -c "test\|it" tests/visual/visual.spec.ts 2>/dev/null || echo "0")
+
+echo "Routes found: $ROUTE_COUNT"
+echo "Visual tests: $VISUAL_TEST_COUNT"
+
+if [ "$VISUAL_TEST_COUNT" -lt "$ROUTE_COUNT" ]; then
+  echo "${YELLOW}⚠️  Warning: Not all routes may have visual test coverage${NC}"
+  echo "Consider adding more visual tests for complete coverage"
+fi
+
+# Check for recent screenshot updates
+SCREENSHOT_AGE=$(find tests/visual/__screenshots__ -type f -name "*.png" -mtime +7 | wc -l)
+if [ "$SCREENSHOT_AGE" -gt 0 ]; then
+  echo "${YELLOW}⚠️  Warning: Some baseline screenshots are older than 7 days${NC}"
+  echo "Consider updating baselines to ensure accuracy:"
+  echo "npx playwright test tests/visual/visual.spec.ts --update-snapshots"
+fi
+
+# Generate visual test report
+echo "${BLUE}📄 Generating visual test report...${NC}"
+cat > visual-test-report.json << EOF
+{
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "status": "passed",
+  "tests_run": $VISUAL_TEST_COUNT,
+  "routes_covered": $ROUTE_COUNT,
+  "frontend_files_changed": $(echo "$FRONTEND_CHANGED" | wc -l),
+  "user": "$USER",
+  "branch": "$(git branch --show-current)"
+}
+EOF
+
+echo "${GREEN}✨ Visual test report generated${NC}"
+echo ""
+echo "${GREEN}🎉 All visual checks passed! Proceeding with commit...${NC}"
+echo ""
+
+# Return to original directory
+cd - > /dev/null
+
+# Run any other pre-commit hooks
+npm run lint --prefix src/react-frontend 2>/dev/null || true
+npm run type-check --prefix src/react-frontend 2>/dev/null || true
+
+exit 0

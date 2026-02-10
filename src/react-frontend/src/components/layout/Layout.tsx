@@ -1,11 +1,15 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Sidebar from './Sidebar';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface LayoutProps {
   children: React.ReactNode;
 }
 
 const Layout: React.FC<LayoutProps> = ({ children }) => {
+  const { user, isAuthenticated, logout } = useAuth();
+  const navigate = useNavigate();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -60,6 +64,35 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
     setIsSidebarCollapsed(!isSidebarCollapsed);
   };
 
+  // Don't show sidebar and header for login/register pages
+  if (!isAuthenticated) {
+    return (
+      <div data-testid="layout-container" className="min-h-screen bg-gray-50">
+        {/* Simple centered header for auth pages */}
+        <header
+          role="banner"
+          className="bg-white shadow-sm border-b border-gray-200"
+        >
+          <div className="flex items-center justify-center px-4 py-3">
+            <h1 className="text-xl font-semibold text-gray-800">
+              Speecher
+            </h1>
+          </div>
+        </header>
+
+        {/* Main Content */}
+        <main
+          role="main"
+          className="flex items-center justify-center min-h-[calc(100vh-64px)] p-6"
+        >
+          <div className="w-full max-w-md">
+            {children}
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div data-testid="layout-container" className="flex h-screen bg-gray-50">
       {/* Sidebar */}
@@ -107,10 +140,22 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
               <h1 className="text-xl font-semibold text-gray-800 ml-4 md:ml-0">
                 Speecher
               </h1>
-              
-              {/* Additional header items can go here */}
+
+              {/* User Info and Logout */}
               <div className="flex items-center space-x-4">
-                {/* Placeholder for future header items */}
+                <span className="text-sm text-gray-600 hidden sm:block">
+                  {user?.email}
+                </span>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await logout();
+                    navigate('/login');
+                  }}
+                  className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors"
+                >
+                  Logout
+                </button>
               </div>
             </div>
           </div>

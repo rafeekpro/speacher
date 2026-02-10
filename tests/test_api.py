@@ -1,14 +1,16 @@
 """
 Comprehensive test suite for Speecher API
 """
-import pytest
+
 import io
-from unittest.mock import Mock, patch
+import os
+import sys
 from datetime import datetime
+from unittest.mock import Mock, patch
+
+import pytest
 from bson.objectid import ObjectId
 from fastapi.testclient import TestClient
-import sys
-import os
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -67,15 +69,14 @@ class TestTranscribeEndpoint:
     @pytest.fixture
     def mock_aws_functions(self):
         """Mock AWS-related functions"""
-        with patch("backend.main.aws_service.upload_file_to_s3") as mock_upload, patch(
-            "backend.main.aws_service.start_transcription_job"
-        ) as mock_start, patch("backend.main.aws_service.wait_for_job_completion") as mock_wait, patch(
-            "backend.main.aws_service.download_transcription_result"
-        ) as mock_download, patch(
-            "backend.main.aws_service.delete_file_from_s3"
-        ) as mock_delete, patch(
-            "backend.main.process_transcription_data"
-        ) as mock_process:
+        with (
+            patch("backend.main.aws_service.upload_file_to_s3") as mock_upload,
+            patch("backend.main.aws_service.start_transcription_job") as mock_start,
+            patch("backend.main.aws_service.wait_for_job_completion") as mock_wait,
+            patch("backend.main.aws_service.download_transcription_result") as mock_download,
+            patch("backend.main.aws_service.delete_file_from_s3") as mock_delete,
+            patch("backend.main.process_transcription_data") as mock_process,
+        ):
             mock_upload.return_value = (True, "test-bucket")  # Returns tuple (success, bucket_name)
             mock_start.return_value = {"JobName": "test-job"}
             mock_wait.return_value = {"TranscriptionJob": {"Transcript": {"TranscriptFileUri": "https://test.uri"}}}

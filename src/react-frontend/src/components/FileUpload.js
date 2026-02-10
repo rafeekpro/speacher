@@ -1,10 +1,27 @@
 import React, { useState, useRef } from 'react';
-import { Upload, File, X, AlertCircle, CheckCircle } from 'lucide-react';
+import { Upload, File, X, AlertCircle, CheckCircle, Languages } from 'lucide-react';
 import './FileUpload.css';
+import TranscriptionProgress from './TranscriptionProgress';
 
-const FileUpload = ({ onFilesUploaded, isLoading, settings }) => {
+const SUPPORTED_LANGUAGES = [
+  { code: 'en-US', name: 'English (US)' },
+  { code: 'en-GB', name: 'English (UK)' },
+  { code: 'es-US', name: 'Spanish (US)' },
+  { code: 'fr-FR', name: 'French' },
+  { code: 'de-DE', name: 'German' },
+  { code: 'it-IT', name: 'Italian' },
+  { code: 'pt-BR', name: 'Portuguese (Brazil)' },
+  { code: 'pl-PL', name: 'Polish' },
+  { code: 'ru-RU', name: 'Russian' },
+  { code: 'ja-JP', name: 'Japanese' },
+  { code: 'ko-KR', name: 'Korean' },
+  { code: 'zh-CN', name: 'Chinese (Mandarin)' }
+];
+
+const FileUpload = ({ onFilesUploaded, isLoading, settings, currentJob, onJobComplete, onJobError }) => {
   const [files, setFiles] = useState([]);
   const [dragActive, setDragActive] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState(settings?.language || 'en-US');
   const fileInputRef = useRef(null);
 
   const supportedFormats = [
@@ -67,22 +84,23 @@ const FileUpload = ({ onFilesUploaded, isLoading, settings }) => {
   const processFiles = async () => {
     for (let fileItem of files) {
       if (fileItem.status !== 'pending') continue;
-      
+
       // Update status to processing
-      setFiles(prev => prev.map(f => 
+      setFiles(prev => prev.map(f =>
         f.id === fileItem.id ? { ...f, status: 'processing' } : f
       ));
 
       try {
-        await onFilesUploaded(fileItem.file, fileItem.file.name);
-        
+        // Pass selected language to the callback
+        await onFilesUploaded(fileItem.file, fileItem.file.name, selectedLanguage);
+
         // Update status to completed
-        setFiles(prev => prev.map(f => 
+        setFiles(prev => prev.map(f =>
           f.id === fileItem.id ? { ...f, status: 'completed', progress: 100 } : f
         ));
       } catch (error) {
         // Update status to error
-        setFiles(prev => prev.map(f => 
+        setFiles(prev => prev.map(f =>
           f.id === fileItem.id ? { ...f, status: 'error', error: error.message } : f
         ));
       }
@@ -94,7 +112,18 @@ const FileUpload = ({ onFilesUploaded, isLoading, settings }) => {
 
   return (
     <div className="file-upload">
-      <div 
+      {/* Show TranscriptionProgress when there's an active job */}
+      {currentJob && onJobComplete && onJobError && (
+        <div className="progress-container">
+          <TranscriptionProgress
+            jobId={currentJob.id}
+            onComplete={onJobComplete}
+            onError={onJobError}
+          />
+        </div>
+      )}
+
+      <div
         className={`upload-zone ${dragActive ? 'drag-active' : ''}`}
         onDragEnter={handleDrag}
         onDragLeave={handleDrag}
@@ -128,16 +157,38 @@ const FileUpload = ({ onFilesUploaded, isLoading, settings }) => {
         <div className="files-list">
           <div className="files-header">
             <h3>Files ({files.length})</h3>
-            {pendingFiles.length > 0 && (
-              <button 
-                className="process-all-btn"
-                onClick={processFiles}
-                disabled={isLoading}
-              >
-                Transcribe All ({pendingFiles.length})
-              </button>
-            )}
           </div>
+
+          {/* Language Selector */}
+          <div className="language-selector">
+            <Languages size={20} className="language-icon" />
+            <label htmlFor="language-select" className="language-label">
+              Transcription Language:
+            </label>
+            <select
+              id="language-select"
+              className="language-dropdown"
+              value={selectedLanguage}
+              onChange={(e) => setSelectedLanguage(e.target.value)}
+              disabled={isLoading}
+            >
+              {SUPPORTED_LANGUAGES.map(lang => (
+                <option key={lang.code} value={lang.code}>
+                  {lang.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {pendingFiles.length > 0 && (
+            <button
+              className="process-all-btn"
+              onClick={processFiles}
+              disabled={isLoading}
+            >
+              Transcribe All ({pendingFiles.length})
+            </button>
+          )}
           
           {files.map(fileItem => (
             <div key={fileItem.id} className={`file-item ${fileItem.status}`}>

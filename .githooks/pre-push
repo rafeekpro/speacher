@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+
+# Pre-push hook for GitHub workflow validation
+# Prevents pushing broken workflows to GitHub
+
+set -euo pipefail
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Get the repository root
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+VALIDATION_SCRIPT="${REPO_ROOT}/.github/scripts/validate-workflows.sh"
+WORKFLOWS_DIR="${REPO_ROOT}/.github/workflows"
+
+# Check if validation script exists
+if [[ ! -f "$VALIDATION_SCRIPT" ]]; then
+    echo -e "${YELLOW}⚠ Warning: Workflow validation script not found${NC}"
+    echo "  Expected at: $VALIDATION_SCRIPT"
+    echo "  Skipping workflow validation..."
+    exit 0
+fi
+
+# Check if there are any workflow changes in the commits being pushed
+CHANGED_WORKFLOWS=()
+while read local_ref local_sha remote_ref remote_sha; do
+    # Get list of changed files
+    if [[ "$remote_sha" == "0000000000000000000000000000000000000000" ]]; then
+        # New branch being pushed
+        FILES=$(git diff --name-only --diff-filter=ACM HEAD~10..HEAD 2>/dev/null || git ls-files)
+    else
+        # Existing branch
+        FILES=$(git diff --name-only --diff-filter=ACM "$remote_sha..$local_sha")
+    fi
+    
+    # Filter for workflow files
+    while IFS= read -r file; do
+        if [[ "$file" =~ ^\.github/workflows/.*\.(yml|yaml)$ ]]; then
+            CHANGED_WORKFLOWS+=("${REPO_ROOT}/$file")
+        fi
+    done <<< "$FILES"
+done
+
+# If no workflows changed, skip validation
+if [[ ${#CHANGED_WORKFLOWS[@]} -eq 0 ]]; then
+    echo -e "${GREEN}✓${NC} No workflow changes detected, skipping validation"
+    exit 0
+fi
+
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${BLUE}Pre-push Workflow Validation${NC}"
+echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+echo "Found ${#CHANGED_WORKFLOWS[@]} modified workflow(s):"
+for workflow in "${CHANGED_WORKFLOWS[@]}"; do
+    echo "  • $(basename "$workflow")"
+done
+echo ""
+
+# Run validation on changed workflows
+echo "Running validation..."
+if "$VALIDATION_SCRIPT" "${CHANGED_WORKFLOWS[@]}"; then
+    echo ""
+    echo -e "${GREEN}✅ Workflow validation passed!${NC}"
+    echo "Proceeding with push..."
+    exit 0
+else
+    EXIT_CODE=$?
+    echo ""
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${RED}❌ PUSH ABORTED: Workflow validation failed!${NC}"
+    echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo "Please fix the workflow errors before pushing."
+    echo ""
+    echo "To bypass validation (NOT RECOMMENDED):"
+    echo "  git push --no-verify"
+    echo ""
+    echo "To run validation manually:"
+    echo "  ${VALIDATION_SCRIPT}"
+    echo ""
+    exit $EXIT_CODE
+fi

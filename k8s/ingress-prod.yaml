@@ -1,0 +1,69 @@
+---
+# Production Frontend Ingress for boostpilot.io
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: speecher-frontend-prod
+  namespace: speecher-prod
+  annotations:
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"  # Use cert-manager for automatic HTTPS
+spec:
+  ingressClassName: traefik
+  tls:
+  - hosts:
+    - speacher.boostpilot.io
+    secretName: speecher-prod-tls  # Certificate will be stored here
+  rules:
+  - host: speacher.boostpilot.io
+    http:
+      paths:
+      - backend:
+          service:
+            name: frontend
+            port:
+              number: 8080
+        path: /
+        pathType: Prefix
+---
+# Production Backend Ingress for boostpilot.io
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: speecher-backend-prod
+  namespace: speecher-prod
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: speecher-strip-api-prefix@kubernetescrd
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: traefik
+  tls:
+  - hosts:
+    - speacher-api.boostpilot.io
+    secretName: speecher-api-prod-tls
+  rules:
+  - host: speacher-api.boostpilot.io
+    http:
+      paths:
+      - backend:
+          service:
+            name: backend
+            port:
+              number: 8000
+        path: /api
+        pathType: Prefix
+      - backend:
+          service:
+            name: backend
+            port:
+              number: 8000
+        path: /ws
+        pathType: Prefix
+      - backend:
+          service:
+            name: backend
+            port:
+              number: 8000
+        path: /docs
+        pathType: Prefix

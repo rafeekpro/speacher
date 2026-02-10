@@ -1,0 +1,15 @@
+{
+  "devDependencies": {
+    "husky": "^9.1.7",
+    "playwright": "^1.55.0"
+  },
+  "scripts": {
+    "prepare": "husky",
+    "test": "docker compose --profile test up --exit-code-from test-runner --abort-on-container-exit",
+    "test:local": "docker compose --profile test up --exit-code-from test-runner --abort-on-container-exit",
+    "test:watch": "docker compose --profile test up",
+    "test:ci": "echo 'CI tests run on Kubernetes. Use npm test for local Docker-based testing.'",
+    "test:cleanup": "docker compose --profile test down -v --remove-orphans",
+    "test:build": "docker compose --profile test build --no-cache test-runner"
+  }
+}

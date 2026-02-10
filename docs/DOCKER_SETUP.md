@@ -68,7 +68,7 @@ curl -X POST http://localhost:8000/api/keys/aws \
 
 ### Run Tests Manually
 ```bash
-docker-compose --profile test up test-runner
+docker compose --profile test up test-runner
 ```
 
 ### Test Results
@@ -79,34 +79,34 @@ Test results are saved to `test_results/results.xml`
 ### View Logs
 ```bash
 # All services
-docker-compose logs -f
+docker compose logs -f
 
 # Specific service
-docker-compose logs -f backend
-docker-compose logs -f mongodb
+docker compose logs -f backend
+docker compose logs -f mongodb
 ```
 
 ### Restart a Service
 ```bash
-docker-compose restart backend
+docker compose restart backend
 ```
 
 ### Execute Commands in Container
 ```bash
 # Backend shell
-docker-compose exec backend bash
+docker compose exec backend bash
 
 # MongoDB shell
-docker-compose exec mongodb mongosh -u admin -p speecher_admin_pass
+docker compose exec mongodb mongosh -u admin -p speecher_admin_pass
 ```
 
 ### Clean Everything
 ```bash
 # Stop and remove containers
-docker-compose down
+docker compose down
 
 # Also remove data volumes
-docker-compose down -v
+docker compose down -v
 ```
 
 ## Environment Variables
@@ -134,7 +134,7 @@ MongoDB is automatically initialized with:
 ### Access MongoDB
 ```bash
 # Using mongosh
-docker-compose exec mongodb mongosh -u speecher_user -p speecher_pass speecher
+docker compose exec mongodb mongosh -u speecher_user -p speecher_pass speecher
 
 # Show collections
 > show collections
@@ -148,11 +148,11 @@ docker-compose exec mongodb mongosh -u speecher_user -p speecher_pass speecher
 ### Services Not Starting
 ```bash
 # Check status
-docker-compose ps
+docker compose ps
 
 # Check logs
-docker-compose logs mongodb
-docker-compose logs backend
+docker compose logs mongodb
+docker compose logs backend
 ```
 
 ### Port Already in Use
@@ -167,19 +167,19 @@ lsof -i :8000
 ### MongoDB Connection Issues
 ```bash
 # Check MongoDB is running
-docker-compose ps mongodb
+docker compose ps mongodb
 
 # Check MongoDB logs
-docker-compose logs mongodb
+docker compose logs mongodb
 
 # Test connection
-docker-compose exec mongodb mongosh -u admin -p speecher_admin_pass --eval "db.runCommand({ping: 1})"
+docker compose exec mongodb mongosh -u admin -p speecher_admin_pass --eval "db.runCommand({ping: 1})"
 ```
 
 ### Clean Start
 ```bash
 # Remove everything and start fresh
-docker-compose down -v
+docker compose down -v
 docker system prune -f
 ./docker-start.sh
 ```
@@ -204,33 +204,33 @@ The setup includes:
 1. Start services: `./docker-start.sh`
 2. Make code changes (hot-reload will apply them)
 3. Run tests: `./docker-test.sh`
-4. View logs: `docker-compose logs -f backend`
+4. View logs: `docker compose logs -f backend`
 5. Stop when done: `./docker-stop.sh`
 
 ## Advanced Usage
 
 ### Run with Custom Environment
 ```bash
-docker-compose --env-file .env.production up
+docker compose --env-file .env.production up
 ```
 
 ### Scale Services
 ```bash
-docker-compose up --scale backend=3
+docker compose up --scale backend=3
 ```
 
 ### Build Images
 ```bash
-docker-compose build --no-cache
+docker compose build --no-cache
 ```
 
 ### Export/Import Database
 ```bash
 # Export
-docker-compose exec mongodb mongodump -u admin -p speecher_admin_pass --out /tmp/backup
+docker compose exec mongodb mongodump -u admin -p speecher_admin_pass --out /tmp/backup
 docker cp speecher-mongodb:/tmp/backup ./backup
 
 # Import
 docker cp ./backup speecher-mongodb:/tmp/backup
-docker-compose exec mongodb mongorestore -u admin -p speecher_admin_pass /tmp/backup
+docker compose exec mongodb mongorestore -u admin -p speecher_admin_pass /tmp/backup
 ```

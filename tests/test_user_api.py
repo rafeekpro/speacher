@@ -1,9 +1,10 @@
 """Tests for user management API endpoints"""
 
-import pytest
 import uuid
-from fastapi.testclient import TestClient
 from typing import Dict
+
+import pytest
+from fastapi.testclient import TestClient
 
 
 def get_error_message(response_json):
@@ -24,7 +25,7 @@ class TestUserManagementAPI:
         # Generate unique email for each test
         unique_id = str(uuid.uuid4())[:8]
         email = f"auth_user_{unique_id}@example.com"
-        
+
         # Register user
         register_data = {"email": email, "password": "SecurePass123!", "full_name": "Auth User"}
         reg_response = client.post("/api/auth/register", json=register_data)
@@ -74,7 +75,7 @@ class TestUserManagementAPI:
         unique_id2 = str(uuid.uuid4())[:8]
         email1 = f"user1_{unique_id1}@example.com"
         email2 = f"user2_{unique_id2}@example.com"
-        
+
         # Register two users
         for i, email in enumerate([email1, email2]):
             register_data = {"email": email, "password": "SecurePass123!", "full_name": f"User {i+1}"}
@@ -205,7 +206,7 @@ class TestUserManagementAPI:
         # Generate unique email
         unique_id = str(uuid.uuid4())[:8]
         email = f"apikey_{unique_id}@example.com"
-        
+
         # Register user and get token
         register_data = {"email": email, "password": "SecurePass123!", "full_name": "API Key User"}
         client.post("/api/auth/register", json=register_data)
@@ -232,7 +233,7 @@ class TestUserManagementAPI:
         # Generate unique email
         unique_id = str(uuid.uuid4())[:8]
         email = f"expired_{unique_id}@example.com"
-        
+
         # Register user and get token
         register_data = {"email": email, "password": "SecurePass123!", "full_name": "Expired Key User"}
         client.post("/api/auth/register", json=register_data)

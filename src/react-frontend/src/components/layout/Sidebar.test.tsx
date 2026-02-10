@@ -300,7 +300,7 @@ describe('Sidebar Component', () => {
       renderSidebar();
 
       const dashboardLink = screen.getByRole('link', { name: /dashboard/i });
-      expect(dashboardLink).toHaveClass('bg-primary-100');
+      expect(dashboardLink).toHaveClass('bg-blue-100');
     });
   });
 });

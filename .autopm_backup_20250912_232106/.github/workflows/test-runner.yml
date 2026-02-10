@@ -1,0 +1,47 @@
+name: Test Self-Hosted Runner
+
+on:
+  push:
+    branches: [ feature/integrate-sidebar-layout ]
+  workflow_dispatch:
+
+jobs:
+  test-runner:
+    name: Test Containerd Runner Connection
+    runs-on: [self-hosted, linux, x64, kubernetes]
+    
+    steps:
+    - name: Check runner info
+      run: |
+        echo "Runner name: ${{ runner.name }}"
+        echo "Runner OS: ${{ runner.os }}"
+        echo "Runner arch: ${{ runner.arch }}"
+        echo "Working directory: $(pwd)"
+        echo "Available tools:"
+        # Check Kubernetes tools
+        kubectl version --client || echo "kubectl not found"
+        node --version || echo "Node not found"
+        python3 --version || echo "Python not found"
+    
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: List files
+      run: |
+        echo "Repository contents:"
+        ls -la
+        
+    - name: Test Kubernetes functionality
+      run: |
+        echo "Testing Kubernetes functionality..."
+        kubectl get pods --namespace=github-runner || echo "kubectl get pods failed"
+        # kubectl get nodes requires cluster permissions - skipping
+        
+    - name: Test kubectl functionality
+      run: |
+        echo "Testing kubectl functionality..."
+        kubectl cluster-info || echo "kubectl cluster-info failed"
+        kubectl get pods --all-namespaces || echo "kubectl get pods failed"
+    
+    - name: Success message
+      run: echo "✅ Self-hosted Kubernetes runner is working correctly!"

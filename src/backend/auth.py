@@ -11,7 +11,8 @@ from fastapi import HTTPException, Security, status
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from passlib.context import CryptContext
 
-from src.backend.models import ApiKeyDB, UserDB
+from src.backend.models import ApiKeyDB, UserDB, UserRole
+from src.backend.users_db import User as UsersDBUser, user_db
 
 # Configuration
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_urlsafe(32))
@@ -26,11 +27,25 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 bearer_scheme = HTTPBearer(auto_error=False)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-# In-memory storage (replace with database in production)
-users_db: Dict[str, UserDB] = {}
-api_keys_db: Dict[str, ApiKeyDB] = {}
-refresh_tokens_db: Dict[str, Dict[str, Any]] = {}
+# Rate limiting storage (keep in-memory for now, could move to Redis later)
 rate_limit_db: Dict[str, list] = {}
+
+
+# Helper functions to convert between user database models
+def _convert_postgres_user_to_model_user(user: UsersDBUser) -> UserDB:
+    """Convert PostgreSQL user model to auth module UserDB model"""
+    # Convert role string to UserRole enum
+    role_enum = UserRole.USER if user.role == "user" else UserRole.ADMIN
+
+    return UserDB(
+        id=str(user.id),
+        email=user.email,
+        password_hash="",  # Not needed for auth operations
+        full_name=user.full_name,
+        role=role_enum,
+        created_at=user.created_at,
+        updated_at=user.updated_at
+    )
 
 
 def hash_password(password: str) -> str:
@@ -76,7 +91,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return encoded_jwt
 
 
-def create_refresh_token(data: dict) -> str:
+async def create_refresh_token(data: dict, user_id: str) -> str:
     """Create a JWT refresh token"""
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
@@ -84,12 +99,16 @@ def create_refresh_token(data: dict) -> str:
 
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-    # Store refresh token
-    user_email = data.get("sub")
-    if user_email:
-        if user_email not in refresh_tokens_db:
-            refresh_tokens_db[user_email] = {}
-        refresh_tokens_db[user_email][encoded_jwt] = {"created_at": datetime.utcnow(), "expires_at": expire}
+    # Store refresh token in database
+    try:
+        await user_db.create_refresh_token(
+            user_id=user_id,
+            token=encoded_jwt,
+            expires_at=expire
+        )
+    except Exception as e:
+        print(f"Warning: Failed to store refresh token in database: {e}")
+        # Continue anyway - token is still valid
 
     return encoded_jwt
 
@@ -105,23 +124,27 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 
-def get_user_by_email(email: str) -> Optional[UserDB]:
-    """Get user by email from database"""
-    return users_db.get(email)
-
-
-def get_user_by_id(user_id: str) -> Optional[UserDB]:
-    """Get user by ID from database"""
-    for user in users_db.values():
-        if user.id == user_id:
-            return user
+async def get_user_by_email(email: str) -> Optional[UserDB]:
+    """Get user by email from PostgreSQL database"""
+    user = await user_db.get_user_by_email(email)
+    if user:
+        return _convert_postgres_user_to_model_user(user)
     return None
 
 
-def create_user(email: str, password: str, full_name: str) -> UserDB:
-    """Create a new user"""
+async def get_user_by_id(user_id: str) -> Optional[UserDB]:
+    """Get user by ID from PostgreSQL database"""
+    user = await user_db.get_user_by_id(user_id)
+    if user:
+        return _convert_postgres_user_to_model_user(user)
+    return None
+
+
+async def create_user(email: str, password: str, full_name: str, role: str = "user") -> UserDB:
+    """Create a new user in PostgreSQL"""
     # Check if user exists
-    if get_user_by_email(email):
+    existing_user = await get_user_by_email(email)
+    if existing_user:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User with this email already exists")
 
     # Validate password
@@ -129,26 +152,27 @@ def create_user(email: str, password: str, full_name: str) -> UserDB:
     if not is_valid:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=message)
 
-    # Create user
-    user = UserDB(email=email, password_hash=hash_password(password), full_name=full_name)
+    # Create user in database
+    password_hash = hash_password(password)
+    user = await user_db.create_user(
+        email=email,
+        password_hash=password_hash,
+        full_name=full_name,
+        role=role
+    )
 
-    users_db[email] = user
-    return user
-
-
-def authenticate_user(email: str, password: str) -> Optional[UserDB]:
-    """Authenticate a user"""
-    user = get_user_by_email(email)
-    if not user:
-        return None
-
-    if not verify_password(password, user.password_hash):
-        return None
-
-    return user
+    return _convert_postgres_user_to_model_user(user)
 
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Security(bearer_scheme)) -> UserDB:
+async def authenticate_user(email: str, password: str) -> Optional[UserDB]:
+    """Authenticate a user using PostgreSQL"""
+    user = await user_db.verify_password_and_get_user(email, password)
+    if user:
+        return _convert_postgres_user_to_model_user(user)
+    return None
+
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(bearer_scheme)) -> UserDB:
     """Get current user from JWT token"""
     token = credentials.credentials
     payload = decode_token(token)
@@ -160,14 +184,14 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(bearer
     if not email:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
 
-    user = get_user_by_email(email)
+    user = await get_user_by_email(email)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
     return user
 
 
-def get_current_user_optional(
+async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
     api_key: Optional[str] = Security(api_key_header),
 ) -> Optional[UserDB]:
@@ -186,14 +210,14 @@ def get_current_user_optional(
     # Try JWT token first (preferred method)
     if credentials and credentials.credentials:
         try:
-            return get_current_user(credentials)
+            return await get_current_user(credentials)
         except HTTPException:
             # Invalid JWT, but might have valid API key
             pass
 
     # Try API key as fallback
     if api_key:
-        user = get_user_by_api_key(api_key)
+        user = await get_user_by_api_key(api_key)
         if user:
             return user
 
@@ -201,7 +225,7 @@ def get_current_user_optional(
     return None
 
 
-def require_auth(
+async def require_auth(
     credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
     api_key: Optional[str] = Security(api_key_header),
 ) -> UserDB:
@@ -212,57 +236,57 @@ def require_auth(
     Raises:
         HTTPException: 401 if no valid authentication is provided.
     """
-    user = get_current_user_optional(credentials, api_key)
+    user = await get_current_user_optional(credentials, api_key)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     return user
 
 
-def create_api_key(user_id: str, name: str, expires_at: Optional[datetime] = None) -> tuple[str, ApiKeyDB]:
-    """Create an API key for a user"""
-    # Generate API key
+async def create_api_key(user_id: str, name: str, expires_at: Optional[datetime] = None) -> tuple[str, ApiKeyDB]:
+    """Create an API key for a user in PostgreSQL"""
     key = secrets.token_urlsafe(32)
-    key_hash = hashlib.sha256(key.encode()).hexdigest()
+    api_key_response = await user_db.create_api_key(
+        user_id=user_id,
+        name=name,
+        key=key,
+        expires_at=expires_at
+    )
 
-    # Create API key record
-    api_key_db = ApiKeyDB(user_id=user_id, name=name, key_hash=key_hash, expires_at=expires_at)
-
-    api_keys_db[key] = api_key_db
+    # Convert to ApiKeyDB model for backwards compatibility
+    api_key_db = ApiKeyDB(
+        id=api_key_response.id,
+        user_id=api_key_response.user_id,
+        name=api_key_response.name,
+        key_hash=api_key_response.key_hash,
+        last_used=api_key_response.last_used,
+        created_at=api_key_response.created_at,
+        expires_at=api_key_response.expires_at
+    )
 
     return key, api_key_db
 
 
-def get_user_by_api_key(api_key: str) -> Optional[UserDB]:
-    """Get user by API key"""
-    api_key_db = api_keys_db.get(api_key)
-    if not api_key_db:
+async def get_user_by_api_key(api_key: str) -> Optional[UserDB]:
+    """Get user by API key from PostgreSQL"""
+    api_key_response = await user_db.verify_api_key(api_key)
+    if not api_key_response:
         return None
 
-    # Check expiration
-    if api_key_db.expires_at and api_key_db.expires_at < datetime.utcnow():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key has expired")
+    # Update last used timestamp
+    await user_db.update_api_key_last_used(api_key)
 
-    # Update last used
-    api_key_db.last_used = datetime.utcnow()
-
-    return get_user_by_id(api_key_db.user_id)
+    # Get and return user
+    return await get_user_by_id(api_key_response.user_id)
 
 
-def revoke_refresh_token(user_email: str, token: str) -> bool:
-    """Revoke a refresh token"""
-    if user_email in refresh_tokens_db:
-        if token in refresh_tokens_db[user_email]:
-            del refresh_tokens_db[user_email][token]
-            return True
-    return False
+async def revoke_refresh_token(token: str) -> bool:
+    """Revoke a refresh token from PostgreSQL"""
+    return await user_db.delete_refresh_token(token)
 
 
-def revoke_all_refresh_tokens(user_email: str) -> bool:
-    """Revoke all refresh tokens for a user"""
-    if user_email in refresh_tokens_db:
-        refresh_tokens_db[user_email] = {}
-        return True
-    return False
+async def revoke_all_refresh_tokens(user_id: str) -> bool:
+    """Revoke all refresh tokens for a user from PostgreSQL"""
+    return await user_db.delete_user_refresh_tokens(user_id)
 
 
 def check_rate_limit(identifier: str, max_attempts: int = 5, window_minutes: int = 15) -> bool:
@@ -285,25 +309,6 @@ def check_rate_limit(identifier: str, max_attempts: int = 5, window_minutes: int
     return True
 
 
-def delete_user(user_id: str) -> bool:
-    """Delete a user and all associated data"""
-    user = get_user_by_id(user_id)
-    if not user:
-        return False
-
-    # Delete user
-    del users_db[user.email]
-
-    # Delete refresh tokens
-    revoke_all_refresh_tokens(user.email)
-
-    # Delete API keys
-    keys_to_delete = []
-    for key, api_key_db in api_keys_db.items():
-        if api_key_db.user_id == user_id:
-            keys_to_delete.append(key)
-
-    for key in keys_to_delete:
-        del api_keys_db[key]
-
-    return True
+async def delete_user(user_id: str) -> bool:
+    """Delete a user and all associated data from PostgreSQL"""
+    return await user_db.delete_user(user_id)

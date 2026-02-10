@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-patched-files
+  namespace: speacher
+data:
+  # Placeholder - files will be added from actual content

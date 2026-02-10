@@ -1,48 +1,76 @@
-# Build stage - using stable LTS version with fallback support
-# Priority: 1. Docker Hub LTS, 2. Standard without alpine for stability
-FROM node:lts-alpine AS build
+# Multi-stage build for production React frontend
+# Stage 1: Build the React application
+FROM node:18-alpine AS builder
 
+# Security: Run as non-root user
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S reactjs -u 1001 -G nodejs
+
+# Set working directory
 WORKDIR /app
 
-# Copy package files
+# Install dependencies for better caching
 COPY src/react-frontend/package*.json ./
+RUN npm ci --only=production --legacy-peer-deps && \
+    npm cache clean --force
 
-# Install all dependencies (including devDependencies for build)
-# Using --legacy-peer-deps to handle TypeScript version conflicts with react-scripts
+# Install dev dependencies for build
+COPY src/react-frontend/package*.json ./
 RUN npm ci --legacy-peer-deps
+
+# Copy root .env for production build (takes precedence over .env.production)
+COPY .env src/react-frontend/.env.production.local
 
 # Copy source code
 COPY src/react-frontend/ ./
 
-# Build the React app
+# Change ownership to non-root user
+RUN chown -R reactjs:nodejs /app
+USER reactjs
+
+# Build the application with optimizations
+ENV NODE_ENV=production
+ENV GENERATE_SOURCEMAP=false
+ENV INLINE_RUNTIME_CHUNK=false
 RUN npm run build
 
-# Production stage - using stable nginx to serve static files
-FROM nginx:stable-alpine
+# Stage 2: Production nginx server
+FROM nginx:1.25-alpine
 
-# Copy built React app from build stage
-COPY --from=build /app/build /usr/share/nginx/html
+# Security: Create non-root user for nginx
+RUN addgroup -g 1001 -S nginx-custom && \
+    adduser -S nginx-user -u 1001 -G nginx-custom && \
+    # Create directories with proper permissions
+    mkdir -p /var/cache/nginx/client_temp \
+             /var/cache/nginx/proxy_temp \
+             /var/cache/nginx/fastcgi_temp \
+             /var/cache/nginx/uwsgi_temp \
+             /var/cache/nginx/scgi_temp \
+             /var/log/nginx \
+             /var/run \
+             /etc/nginx/conf.d && \
+    # Set ownership for nginx directories
+    chown -R nginx-user:nginx-custom /var/cache/nginx \
+                                     /var/log/nginx \
+                                     /var/run \
+                                     /etc/nginx \
+                                     /usr/share/nginx/html
 
-# Custom nginx configuration for React Router
-RUN echo 'server { \
-    listen 80; \
-    location / { \
-        root /usr/share/nginx/html; \
-        index index.html index.htm; \
-        try_files $uri $uri/ /index.html; \
-    } \
-    location /api { \
-        proxy_pass http://backend:8000; \
-        proxy_http_version 1.1; \
-        proxy_set_header Upgrade $http_upgrade; \
-        proxy_set_header Connection "upgrade"; \
-        proxy_set_header Host $host; \
-        proxy_set_header X-Real-IP $remote_addr; \
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; \
-        proxy_set_header X-Forwarded-Proto $scheme; \
-    } \
-}' > /etc/nginx/conf.d/default.conf
+# Copy nginx server configuration to conf.d directory
+COPY docker/nginx.prod.conf /etc/nginx/conf.d/default.conf
 
-EXPOSE 80
+# Copy built files from builder stage
+COPY --from=builder --chown=nginx-user:nginx-custom /app/build /usr/share/nginx/html
 
+# Switch to non-root user
+USER nginx-user
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+
+# Use non-privileged port
+EXPOSE 8080
+
+# Start nginx with custom configuration
 CMD ["nginx", "-g", "daemon off;"]

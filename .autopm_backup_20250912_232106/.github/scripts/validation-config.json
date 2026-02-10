@@ -1,0 +1,44 @@
+{
+  "skip_cloud_tools": false,
+  "strict_mode": false,
+  "ignored_workflows": [],
+  "custom_checks": {
+    "require_version_tags": true,
+    "check_deprecated_actions": true,
+    "validate_secrets": true,
+    "check_environment_vars": true
+  },
+  "required_actions": {
+    "checkout": "actions/checkout@v4",
+    "setup-node": "actions/setup-node@v4",
+    "setup-python": "actions/setup-python@v5",
+    "upload-artifact": "actions/upload-artifact@v4",
+    "download-artifact": "actions/download-artifact@v4",
+    "cache": "actions/cache@v4"
+  },
+  "known_commands": {
+    "cloud_cli": ["aws", "az", "gcloud", "kubectl", "terraform", "helm"],
+    "build_tools": ["npm", "yarn", "pnpm", "pip", "poetry", "cargo", "go", "make"],
+    "test_tools": ["pytest", "jest", "mocha", "playwright", "cypress"],
+    "linters": ["eslint", "prettier", "black", "flake8", "mypy", "shellcheck", "yamllint"],
+    "database": ["psql", "mongosh", "redis-cli", "mysql"],
+    "optional": ["jq", "yq", "xmllint", "tree", "wget", "curl"]
+  },
+  "runner_labels": {
+    "ubuntu-latest": {
+      "available_tools": ["git", "docker", "node", "python3", "make", "gcc", "curl", "wget"],
+      "missing_tools": ["aws", "az", "gcloud"]
+    },
+    "self-hosted": {
+      "available_tools": ["git", "docker", "node", "python3", "kubectl", "terraform"],
+      "note": "Verify self-hosted runner configuration"
+    }
+  },
+  "suggestions": {
+    "missing_command": "Consider adding '|| true' to make the command optional, or use 'if command -v {cmd} &> /dev/null; then ... fi'",
+    "deprecated_action": "Update to the latest version: {suggestion}",
+    "missing_env_var": "Define the environment variable at workflow, job, or step level",
+    "yaml_error": "Check indentation and use spaces instead of tabs",
+    "missing_version": "Always specify action versions for reproducibility"
+  }
+}

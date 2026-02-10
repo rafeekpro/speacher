@@ -3,17 +3,17 @@
 Unit tests for the main module which handles the application workflow.
 """
 
-import unittest
 import os
 import tempfile
-from unittest.mock import patch, MagicMock, mock_open
+import unittest
 from pathlib import Path
-
-# Import test utilities
-from tests.test_utils import setup_test_data_dir, create_sample_wav_file, get_sample_transcription_data
+from unittest.mock import MagicMock, mock_open, patch
 
 # Import the module to test
 from src.speecher import main
+
+# Import test utilities
+from tests.test_utils import create_sample_wav_file, get_sample_transcription_data, setup_test_data_dir
 
 
 class TestMainModule(unittest.TestCase):
@@ -46,21 +46,17 @@ class TestMainModule(unittest.TestCase):
         mock_parse_args.return_value = mock_args
 
         # Mock AWS functions to avoid actual API calls
-        with patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name, patch(
-            "src.speecher.aws.create_s3_bucket"
-        ) as mock_create_bucket, patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file, patch(
-            "src.speecher.aws.start_transcription_job"
-        ) as mock_start_job, patch(
-            "src.speecher.aws.wait_for_job_completion"
-        ) as mock_wait_for_job, patch(
-            "src.speecher.aws.download_transcription_result"
-        ) as mock_download_result, patch(
-            "src.speecher.transcription.process_transcription_result"
-        ) as mock_process_result, patch(
-            "src.speecher.aws.cleanup_resources"
-        ) as mock_cleanup, patch(
-            "src.speecher.aws.get_supported_languages"
-        ) as mock_get_languages:
+        with (
+            patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name,
+            patch("src.speecher.aws.create_s3_bucket") as mock_create_bucket,
+            patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file,
+            patch("src.speecher.aws.start_transcription_job") as mock_start_job,
+            patch("src.speecher.aws.wait_for_job_completion") as mock_wait_for_job,
+            patch("src.speecher.aws.download_transcription_result") as mock_download_result,
+            patch("src.speecher.transcription.process_transcription_result") as mock_process_result,
+            patch("src.speecher.aws.cleanup_resources") as mock_cleanup,
+            patch("src.speecher.aws.get_supported_languages") as mock_get_languages,
+        ):
             # Setup return values for the mocks
             mock_create_bucket_name.return_value = self.bucket_name
             mock_create_bucket.return_value = True
@@ -117,19 +113,16 @@ class TestMainModule(unittest.TestCase):
         mock_parse_args.return_value = mock_args
 
         # Mock AWS functions
-        with patch("src.speecher.aws.create_s3_bucket") as mock_create_bucket, patch(
-            "src.speecher.aws.upload_file_to_s3"
-        ) as mock_upload_file, patch("src.speecher.aws.start_transcription_job") as mock_start_job, patch(
-            "src.speecher.aws.wait_for_job_completion"
-        ) as mock_wait_for_job, patch(
-            "src.speecher.aws.download_transcription_result"
-        ) as mock_download_result, patch(
-            "src.speecher.transcription.process_transcription_result"
-        ) as mock_process_result, patch(
-            "src.speecher.aws.delete_file_from_s3"
-        ) as mock_delete_file, patch(
-            "src.speecher.aws.get_supported_languages"
-        ) as mock_get_languages:
+        with (
+            patch("src.speecher.aws.create_s3_bucket") as mock_create_bucket,
+            patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file,
+            patch("src.speecher.aws.start_transcription_job") as mock_start_job,
+            patch("src.speecher.aws.wait_for_job_completion") as mock_wait_for_job,
+            patch("src.speecher.aws.download_transcription_result") as mock_download_result,
+            patch("src.speecher.transcription.process_transcription_result") as mock_process_result,
+            patch("src.speecher.aws.delete_file_from_s3") as mock_delete_file,
+            patch("src.speecher.aws.get_supported_languages") as mock_get_languages,
+        ):
             # Setup return values for the mocks
             mock_upload_file.return_value = True
             mock_start_job.return_value = {"TranscriptionJob": {"TranscriptionJobName": self.job_name}}
@@ -182,23 +175,18 @@ class TestMainModule(unittest.TestCase):
         mock_parse_args.return_value = mock_args
 
         # Mock AWS functions
-        with patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name, patch(
-            "src.speecher.aws.create_s3_bucket"
-        ) as mock_create_bucket, patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file, patch(
-            "src.speecher.aws.start_transcription_job"
-        ) as mock_start_job, patch(
-            "src.speecher.aws.wait_for_job_completion"
-        ) as mock_wait_for_job, patch(
-            "src.speecher.aws.download_transcription_result"
-        ) as mock_download_result, patch(
-            "src.speecher.transcription.process_transcription_result"
-        ) as mock_process_result, patch(
-            "src.speecher.aws.cleanup_resources"
-        ) as mock_cleanup, patch(
-            "src.speecher.aws.get_supported_languages"
-        ) as mock_get_languages, patch(
-            "logging.Logger.info"
-        ) as mock_logger_info:
+        with (
+            patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name,
+            patch("src.speecher.aws.create_s3_bucket") as mock_create_bucket,
+            patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file,
+            patch("src.speecher.aws.start_transcription_job") as mock_start_job,
+            patch("src.speecher.aws.wait_for_job_completion") as mock_wait_for_job,
+            patch("src.speecher.aws.download_transcription_result") as mock_download_result,
+            patch("src.speecher.transcription.process_transcription_result") as mock_process_result,
+            patch("src.speecher.aws.cleanup_resources") as mock_cleanup,
+            patch("src.speecher.aws.get_supported_languages") as mock_get_languages,
+            patch("logging.Logger.info") as mock_logger_info,
+        ):
             # Setup return values for the mocks
             mock_create_bucket_name.return_value = self.bucket_name
             mock_create_bucket.return_value = True
@@ -258,21 +246,17 @@ class TestMainModule(unittest.TestCase):
         mock_parse_args.return_value = mock_args
 
         # Mock AWS functions
-        with patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name, patch(
-            "src.speecher.aws.create_s3_bucket"
-        ) as mock_create_bucket, patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file, patch(
-            "src.speecher.aws.start_transcription_job"
-        ) as mock_start_job, patch(
-            "src.speecher.aws.wait_for_job_completion"
-        ) as mock_wait_for_job, patch(
-            "src.speecher.aws.download_transcription_result"
-        ) as mock_download_result, patch(
-            "src.speecher.transcription.process_transcription_result"
-        ) as mock_process_result, patch(
-            "src.speecher.aws.cleanup_resources"
-        ) as mock_cleanup, patch(
-            "src.speecher.aws.get_supported_languages"
-        ) as mock_get_languages:
+        with (
+            patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name,
+            patch("src.speecher.aws.create_s3_bucket") as mock_create_bucket,
+            patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file,
+            patch("src.speecher.aws.start_transcription_job") as mock_start_job,
+            patch("src.speecher.aws.wait_for_job_completion") as mock_wait_for_job,
+            patch("src.speecher.aws.download_transcription_result") as mock_download_result,
+            patch("src.speecher.transcription.process_transcription_result") as mock_process_result,
+            patch("src.speecher.aws.cleanup_resources") as mock_cleanup,
+            patch("src.speecher.aws.get_supported_languages") as mock_get_languages,
+        ):
             # Setup return values for the mocks
             mock_create_bucket_name.return_value = self.bucket_name
             mock_create_bucket.return_value = True
@@ -327,21 +311,17 @@ class TestMainModule(unittest.TestCase):
             mock_parse_args.return_value = mock_args
 
             # Mock AWS functions
-            with patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name, patch(
-                "src.speecher.aws.create_s3_bucket"
-            ) as mock_create_bucket, patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file, patch(
-                "src.speecher.aws.start_transcription_job"
-            ) as mock_start_job, patch(
-                "src.speecher.aws.wait_for_job_completion"
-            ) as mock_wait_for_job, patch(
-                "src.speecher.aws.download_transcription_result"
-            ) as mock_download_result, patch(
-                "src.speecher.transcription.process_transcription_result"
-            ) as mock_process_result, patch(
-                "src.speecher.aws.cleanup_resources"
-            ) as mock_cleanup, patch(
-                "src.speecher.aws.get_supported_languages"
-            ) as mock_get_languages:
+            with (
+                patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name,
+                patch("src.speecher.aws.create_s3_bucket") as mock_create_bucket,
+                patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file,
+                patch("src.speecher.aws.start_transcription_job") as mock_start_job,
+                patch("src.speecher.aws.wait_for_job_completion") as mock_wait_for_job,
+                patch("src.speecher.aws.download_transcription_result") as mock_download_result,
+                patch("src.speecher.transcription.process_transcription_result") as mock_process_result,
+                patch("src.speecher.aws.cleanup_resources") as mock_cleanup,
+                patch("src.speecher.aws.get_supported_languages") as mock_get_languages,
+            ):
                 # Setup return values for the mocks
                 mock_create_bucket_name.return_value = self.bucket_name
                 mock_create_bucket.return_value = True
@@ -394,9 +374,10 @@ class TestMainModule(unittest.TestCase):
         mock_parse_args.return_value = mock_args
 
         # Mock AWS functions
-        with patch("src.speecher.aws.get_supported_languages") as mock_get_languages, patch(
-            "logging.Logger.error"
-        ) as mock_logger_error:
+        with (
+            patch("src.speecher.aws.get_supported_languages") as mock_get_languages,
+            patch("logging.Logger.error") as mock_logger_error,
+        ):
             mock_get_languages.return_value = {"pl-PL": "polski", "en-US": "angielski (USA)"}
 
             # Call the main function
@@ -433,9 +414,10 @@ class TestMainModule(unittest.TestCase):
             mock_parse_args.return_value = mock_args
 
             # Mock AWS functions
-            with patch("src.speecher.aws.get_supported_languages") as mock_get_languages, patch(
-                "logging.Logger.error"
-            ) as mock_logger_error:
+            with (
+                patch("src.speecher.aws.get_supported_languages") as mock_get_languages,
+                patch("logging.Logger.error") as mock_logger_error,
+            ):
                 mock_get_languages.return_value = {"pl-PL": "polski", "en-US": "angielski (USA)"}
 
                 # Call the main function
@@ -469,25 +451,19 @@ class TestMainModule(unittest.TestCase):
         mock_parse_args.return_value = mock_args
 
         # Mock AWS functions
-        with patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name, patch(
-            "src.speecher.aws.create_s3_bucket"
-        ) as mock_create_bucket, patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file, patch(
-            "src.speecher.aws.start_transcription_job"
-        ) as mock_start_job, patch(
-            "src.speecher.aws.wait_for_job_completion"
-        ) as mock_wait_for_job, patch(
-            "src.speecher.aws.download_transcription_result"
-        ) as mock_download_result, patch(
-            "src.speecher.transcription.process_transcription_result"
-        ) as mock_process_result, patch(
-            "src.speecher.aws.cleanup_resources"
-        ) as mock_cleanup, patch(
-            "src.speecher.aws.calculate_service_cost"
-        ) as mock_calculate_cost, patch(
-            "src.speecher.aws.get_supported_languages"
-        ) as mock_get_languages, patch(
-            "builtins.print"
-        ) as mock_print:
+        with (
+            patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name,
+            patch("src.speecher.aws.create_s3_bucket") as mock_create_bucket,
+            patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file,
+            patch("src.speecher.aws.start_transcription_job") as mock_start_job,
+            patch("src.speecher.aws.wait_for_job_completion") as mock_wait_for_job,
+            patch("src.speecher.aws.download_transcription_result") as mock_download_result,
+            patch("src.speecher.transcription.process_transcription_result") as mock_process_result,
+            patch("src.speecher.aws.cleanup_resources") as mock_cleanup,
+            patch("src.speecher.aws.calculate_service_cost") as mock_calculate_cost,
+            patch("src.speecher.aws.get_supported_languages") as mock_get_languages,
+            patch("builtins.print") as mock_print,
+        ):
             # Setup return values for the mocks
             mock_create_bucket_name.return_value = self.bucket_name
             mock_create_bucket.return_value = True
@@ -551,9 +527,11 @@ class TestMainModule(unittest.TestCase):
         # Test scenarios where different AWS operations fail
 
         # Scenario 1: S3 bucket creation fails
-        with patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name, patch(
-            "src.speecher.aws.create_s3_bucket"
-        ) as mock_create_bucket, patch("src.speecher.aws.get_supported_languages") as mock_get_languages:
+        with (
+            patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name,
+            patch("src.speecher.aws.create_s3_bucket") as mock_create_bucket,
+            patch("src.speecher.aws.get_supported_languages") as mock_get_languages,
+        ):
             mock_create_bucket_name.return_value = self.bucket_name
             mock_create_bucket.return_value = False  # Bucket creation fails
             mock_get_languages.return_value = {"pl-PL": "polski", "en-US": "angielski (USA)"}
@@ -566,11 +544,12 @@ class TestMainModule(unittest.TestCase):
                 self.assertEqual(result, 1)
 
         # Scenario 2: File upload fails
-        with patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name, patch(
-            "src.speecher.aws.create_s3_bucket"
-        ) as mock_create_bucket, patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file, patch(
-            "src.speecher.aws.get_supported_languages"
-        ) as mock_get_languages:
+        with (
+            patch("src.speecher.aws.create_unique_bucket_name") as mock_create_bucket_name,
+            patch("src.speecher.aws.create_s3_bucket") as mock_create_bucket,
+            patch("src.speecher.aws.upload_file_to_s3") as mock_upload_file,
+            patch("src.speecher.aws.get_supported_languages") as mock_get_languages,
+        ):
             mock_create_bucket_name.return_value = self.bucket_name
             mock_create_bucket.return_value = True
             mock_upload_file.return_value = False  # Upload fails

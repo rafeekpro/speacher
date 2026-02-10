@@ -1,45 +1,21 @@
 services:
-  mongodb:
-    image: mongo:7.0
-    container_name: speecher-mongodb
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: speecher_admin_pass
-      MONGO_INITDB_DATABASE: speecher
-    volumes:
-      - mongodb_data:/data/db
-      - ./docker/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/speecher --quiet
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    networks:
-      - speecher-network
-
   backend:
     build:
       context: .
       dockerfile: docker/backend.Dockerfile
-    container_name: speecher-backend
+    container_name: speacher-backend
     restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
-      # MongoDB configuration
-      MONGODB_URI: mongodb://speecher_user:speecher_pass@mongodb:27017/speecher?authSource=speecher
-      MONGODB_DB: speecher
-      MONGODB_COLLECTION: transcriptions
-      
+      # PostgreSQL configuration
+      DATABASE_URL: postgresql://speecher_user:speecher_pass@10.0.0.5:30432/speecher
+
       # AWS Configuration
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
-      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-speecher-audio}
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME:-speacher-audio}
       
       # Azure Configuration
       AZURE_STORAGE_ACCOUNT: ${AZURE_STORAGE_ACCOUNT:-}
@@ -50,7 +26,7 @@ services:
       
       # Google Cloud Configuration
       GCP_PROJECT_ID: ${GCP_PROJECT_ID:-}
-      GCP_BUCKET_NAME: ${GCP_BUCKET_NAME:-speecher-gcp}
+      GCP_BUCKET_NAME: ${GCP_BUCKET_NAME:-speacher-gcp}
       GCP_CREDENTIALS_FILE: ${GCP_CREDENTIALS_FILE:-}
       
       # Application settings
@@ -63,9 +39,6 @@ services:
       - ./tests:/app/tests:ro
       # Mount for temporary files
       - /tmp:/tmp
-    depends_on:
-      mongodb:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -73,61 +46,73 @@ services:
       retries: 3
       start_period: 40s
     networks:
-      - speecher-network
+      - speacher-network
     command: ["uvicorn", "src.backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
   frontend:
     build:
       context: .
       dockerfile: docker/react.Dockerfile
-    container_name: speecher-react
+    container_name: speacher-react
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "3000:8080"
     environment:
       REACT_APP_API_URL: http://localhost:8000
     depends_on:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
     networks:
-      - speecher-network
+      - speacher-network
 
-  # Test runner service - run with: docker-compose --profile test up test-runner
+  # Test runner service - run with: docker compose --profile test up test-runner
   test-runner:
     build:
       context: .
       dockerfile: docker/test.Dockerfile
-    container_name: speecher-tests
+    container_name: speacher-tests
     environment:
-      MONGODB_URI: mongodb://speecher_user:speecher_pass@mongodb:27017/speecher_test?authSource=speecher
-      MONGODB_DB: speecher_test
+      # Test database configuration - uses PostgreSQL
+      DATABASE_URL: postgresql://speecher_user:speecher_pass@10.0.0.5:30432/speecher_test
+
+      # Backend service URL for integration tests
       BACKEND_URL: http://backend:8000
+
+      # Python configuration
       PYTHONUNBUFFERED: 1
+
+      # AWS Test Configuration (optional)
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+
+      # Test environment indicator
+      ENVIRONMENT: test
     volumes:
       - ./src:/app/src:ro
       - ./tests:/app/tests:ro
       - ./test_results:/app/test_results
+      - ./docker/scripts:/app/scripts:ro
     depends_on:
-      mongodb:
-        condition: service_healthy
       backend:
         condition: service_healthy
     networks:
-      - speecher-network
+      - speacher-network
     profiles:
       - test  # Only run when explicitly requested
-    command: ["pytest", "tests/", "-v", "--tb=short", "--junit-xml=/app/test_results/results.xml"]
-
-volumes:
-  mongodb_data:
-    driver: local
+    command: >
+      sh -c "
+        echo 'Initializing test environment...' &&
+        echo 'Running tests...' &&
+        pytest tests/ -v --tb=short --junit-xml=/app/test_results/results.xml --maxfail=10 -x
+      "
 
 networks:
-  speecher-network:
+  speacher-network:
     driver: bridge

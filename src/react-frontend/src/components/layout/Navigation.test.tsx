@@ -1,5 +1,6 @@
-import React, { act } from 'react';
+import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
+import { act } from 'react';
 import Navigation from './Navigation';
 import { useLocation } from 'react-router-dom';
 
@@ -80,7 +81,7 @@ describe('Navigation Component', () => {
       renderNavigation();
       
       const recordLink = screen.getByRole('link', { name: /record/i });
-      expect(recordLink).toHaveClass('bg-primary-100', 'text-primary-700');
+      expect(recordLink).toHaveClass('bg-blue-100', 'text-blue-700');
     });
 
     it('should not highlight inactive navigation items', () => {
@@ -88,7 +89,7 @@ describe('Navigation Component', () => {
       renderNavigation();
       
       const dashboardLink = screen.getByRole('link', { name: /dashboard/i });
-      expect(dashboardLink).not.toHaveClass('bg-primary-100');
+      expect(dashboardLink).not.toHaveClass('bg-blue-100');
     });
 
     it('should update active state when location changes', () => {
@@ -96,7 +97,7 @@ describe('Navigation Component', () => {
       
       // Initially on dashboard
       let dashboardLink = screen.getByRole('link', { name: /dashboard/i });
-      expect(dashboardLink).toHaveClass('bg-primary-100');
+      expect(dashboardLink).toHaveClass('bg-blue-100');
       
       // Change to record
       (useLocation as jest.Mock).mockReturnValue({ pathname: '/record' });
@@ -106,8 +107,8 @@ describe('Navigation Component', () => {
       
       const recordLink = screen.getByRole('link', { name: /record/i });
       dashboardLink = screen.getByRole('link', { name: /dashboard/i });
-      expect(recordLink).toHaveClass('bg-primary-100');
-      expect(dashboardLink).not.toHaveClass('bg-primary-100');
+      expect(recordLink).toHaveClass('bg-blue-100');
+      expect(dashboardLink).not.toHaveClass('bg-blue-100');
     });
   });
 

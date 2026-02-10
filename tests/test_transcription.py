@@ -3,18 +3,18 @@
 Unit tests for the transcription module which handles processing of transcription results.
 """
 
-import unittest
 import json
-import tempfile
 import os
-from unittest.mock import patch
+import tempfile
+import unittest
 from pathlib import Path
-
-# Import test utilities
-from tests.test_utils import setup_test_data_dir, get_sample_transcription_data, save_sample_transcription_to_file
+from unittest.mock import patch
 
 # Import the module to test
 from src.speecher import transcription
+
+# Import test utilities
+from tests.test_utils import get_sample_transcription_data, save_sample_transcription_to_file, setup_test_data_dir
 
 
 class TestTranscriptionModule(unittest.TestCase):

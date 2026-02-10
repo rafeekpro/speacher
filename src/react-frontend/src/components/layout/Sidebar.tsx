@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import React, { useEffect, useState, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import Navigation from './Navigation';
 
@@ -17,12 +17,14 @@ const Sidebar: React.FC<SidebarProps> = ({
   onToggleCollapse: externalOnToggleCollapse
 }) => {
   const { user, logout } = useAuth();
-  const location = useLocation();
   const [internalIsCollapsed, setInternalIsCollapsed] = useState(false);
   
   // Use external state if provided, otherwise use internal state
   const isCollapsed = externalIsCollapsed !== undefined ? externalIsCollapsed : internalIsCollapsed;
-  const handleToggleCollapse = externalOnToggleCollapse || (() => setInternalIsCollapsed(!internalIsCollapsed));
+  const handleToggleCollapse = useMemo(
+    () => externalOnToggleCollapse || (() => setInternalIsCollapsed(!internalIsCollapsed)),
+    [externalOnToggleCollapse, internalIsCollapsed]
+  );
 
   // Keyboard shortcut for toggling sidebar
   useEffect(() => {
@@ -46,6 +48,7 @@ const Sidebar: React.FC<SidebarProps> = ({
     { path: '/record', label: 'Record', icon: 'mic' },
     { path: '/upload', label: 'Upload', icon: 'upload' },
     { path: '/history', label: 'History', icon: 'history' },
+    { path: '/files', label: 'Files', icon: 'file' },
     { path: '/statistics', label: 'Statistics', icon: 'chart' },
     { path: '/settings', label: 'Settings', icon: 'settings' }
   ];

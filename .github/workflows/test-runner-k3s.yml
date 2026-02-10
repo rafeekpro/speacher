@@ -1,0 +1,119 @@
+name: Test Self-Hosted Runner (K3s Compatible)
+
+on:
+  push:
+    branches: [ feature/integrate-sidebar-layout ]
+  workflow_dispatch:
+
+jobs:
+  test-runner:
+    name: Test K3s Runner Connection
+    runs-on: [self-hosted, linux, x64, kubernetes]
+    
+    steps:
+    - name: Check runner info
+      run: |
+        echo "Runner name: ${{ runner.name }}"
+        echo "Runner OS: ${{ runner.os }}"
+        echo "Runner arch: ${{ runner.arch }}"
+        echo "Working directory: $(pwd)"
+        echo "Available tools:"
+        
+    - name: Check Container Runtime
+      run: |
+        echo "=== Container Runtime Check ==="
+        
+        # Check for containerd (K3s default)
+        if command -v ctr >/dev/null 2>&1; then
+          echo "✅ containerd found: $(ctr version | head -n 1)"
+        else
+          echo "❌ containerd (ctr) not found"
+        fi
+        
+        # Check for Kubernetes tools
+        if command -v kubectl >/dev/null 2>&1; then
+          echo "✅ kubectl found"
+        else
+          echo "⚠️ kubectl not found"
+        fi
+        
+        
+    - name: Check Kubernetes
+      run: |
+        echo "=== Kubernetes Check ==="
+        
+        if command -v kubectl >/dev/null 2>&1; then
+          echo "✅ kubectl found: $(kubectl version --client --short)"
+          
+          if kubectl cluster-info >/dev/null 2>&1; then
+            echo "✅ K3s cluster accessible"
+            # Note: kubectl get nodes requires cluster-level permissions
+            kubectl get namespaces
+          else
+            echo "❌ K3s cluster not accessible"
+          fi
+        else
+          echo "❌ kubectl not found"
+        fi
+        
+    - name: Check Other Tools  
+      run: |
+        echo "=== Other Tools Check ==="
+        node --version || echo "❌ Node not found"
+        python3 --version || echo "❌ Python not found"
+        
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: List files
+      run: |
+        echo "Repository contents:"
+        ls -la
+        
+        
+    - name: Test Kubernetes Deployment
+      run: |
+        if command -v kubectl >/dev/null 2>&1 && kubectl cluster-info >/dev/null 2>&1; then
+          echo "Testing Kubernetes deployment..."
+          
+          # Use github-runner namespace
+          
+          # Deploy nginx test pod
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: test-nginx
+            namespace: github-runner
+          spec:
+            containers:
+            - name: nginx
+              image: nginx:alpine
+              ports:
+              - containerPort: 80
+EOF
+          
+          # Wait and test
+          kubectl wait --for=condition=ready pod/test-nginx -n github-runner --timeout=60s
+          kubectl get pod test-nginx -n github-runner
+          
+          # Cleanup
+          kubectl delete pod test-nginx -n github-runner --wait=true
+          
+          echo "✅ Kubernetes deployment test successful!"
+        else
+          echo "⚠️ Skipping Kubernetes test - cluster not accessible"
+        fi
+    
+    - name: Success message
+      run: |
+        echo "================================="
+        echo "✅ K3s self-hosted runner working!"
+        echo "================================="
+        echo ""
+        echo "Capabilities detected:"
+        command -v ctr >/dev/null 2>&1 && echo "✅ containerd (ctr)"
+        command -v kubectl >/dev/null 2>&1 && echo "✅ kubectl (Kubernetes)"
+        kubectl cluster-info >/dev/null 2>&1 && echo "✅ K3s cluster access"
+        echo ""
+        echo "Ready for K3s-based CI/CD workflows!"

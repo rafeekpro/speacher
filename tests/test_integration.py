@@ -1,13 +1,15 @@
 """
 Integration tests for MongoDB and end-to-end API flows
 """
-import pytest
+
 import asyncio
 import os
-from datetime import datetime, timedelta
-from bson.objectid import ObjectId
-from unittest.mock import patch, Mock
 import sys
+from datetime import datetime, timedelta
+from unittest.mock import Mock, patch
+
+import pytest
+from bson.objectid import ObjectId
 
 # Set testing environment
 os.environ["TESTING"] = "true"
@@ -23,6 +25,7 @@ sys.modules["speecher.gcp"] = MockGCPService
 sys.modules["speecher.transcription"] = MockTranscription
 
 from fastapi.testclient import TestClient
+
 from backend.main import app
 
 client = TestClient(app)

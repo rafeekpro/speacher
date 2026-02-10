@@ -1,51 +1,61 @@
-"""
-API Keys management module for storing provider credentials in MongoDB.
-"""
+"""API Keys management module for storing provider credentials in PostgreSQL."""
 
-import base64
-import hashlib
+import json
 import os
 from datetime import datetime
 from typing import Any, Dict, Optional
-
 from cryptography.fernet import Fernet
-from pymongo import MongoClient
+import base64
+import hashlib
+from sqlalchemy import create_engine, Column, String, Boolean, DateTime, JSON
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.ext.declarative import declarative_base
+
+# Database URL from environment
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://speacher_user:SpeacherPro4_2024!@10.0.0.5:30432/speacher")
+
+# SQLAlchemy setup
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=3600)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+
+# SQLAlchemy model for Provider API Keys (cloud credentials)
+class ProviderAPIKey(Base):
+    __tablename__ = "provider_api_keys"
+
+    provider = Column(String(50), primary_key=True)
+    keys = Column(JSON, nullable=True)
+    enabled = Column(Boolean, default=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            "provider": self.provider,
+            "keys": self.keys,
+            "enabled": self.enabled,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
 
 
 class APIKeysManager:
-    def __init__(self, mongodb_uri: str, db_name: str):
-        self.mongodb_available = False
-        try:
-            self.client = MongoClient(mongodb_uri, serverSelectionTimeoutMS=2000)
-            # Test connection
-            self.client.server_info()
-            self.db = self.client[db_name]
-            self.collection = self.db["api_keys"]
-            self.mongodb_available = True
+    def __init__(self, database_url: str):
+        self.database_url = database_url
+        self.engine = create_engine(database_url, pool_pre_ping=True, pool_recycle=3600)
+        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
-            # Try to create unique index on provider, but don't fail if it doesn't work
-            try:
-                self.collection.create_index("provider", unique=True)
-            except Exception as e:
-                print(f"Warning: Could not create index on api_keys collection: {e}")
-        except Exception as e:
-            print(f"Warning: MongoDB not available, using environment variables fallback: {e}")
-            self.client = None
-            self.db = None
-            self.collection = None
+        # Create tables
+        Base.metadata.create_all(self.engine)
 
         # Generate or load encryption key
         self.cipher_suite = self._get_cipher()
 
     def _get_cipher(self) -> Fernet:
         """Get or create encryption cipher for API keys."""
-        # Use a master key from environment or generate one
         master_key = os.getenv("ENCRYPTION_KEY")
         if not master_key:
-            # In production, this should be stored securely
-            master_key = "speecher-default-encryption-key-change-in-production"
+            master_key = "speacher-default-encryption-key-change-in-production"
 
-        # Derive a proper key from the master key
         key = base64.urlsafe_b64encode(hashlib.sha256(master_key.encode()).digest())
         return Fernet(key)
 
@@ -67,71 +77,82 @@ class APIKeysManager:
     def save_api_keys(self, provider: str, keys: Dict[str, Any]) -> bool:
         """Save or update API keys for a provider."""
         try:
+            session = self.SessionLocal()
+
             # Encrypt sensitive values
             encrypted_keys = {}
             for key, value in keys.items():
-                if value and any(sensitive in key.lower() for sensitive in ["key", "secret", "token", "password"]):
+                if value and any(sensitive in key.lower() for sensitive in ["secret", "token", "password"]):
                     encrypted_keys[key] = self.encrypt_value(str(value))
                 else:
                     encrypted_keys[key] = value
 
-            document = {"provider": provider, "keys": encrypted_keys, "updated_at": datetime.utcnow(), "enabled": True}
+            # Check if provider exists
+            api_key = session.query(ProviderAPIKey).filter_by(provider=provider).first()
 
-            # Upsert (update or insert)
-            self.collection.replace_one({"provider": provider}, document, upsert=True)
+            if api_key:
+                api_key.keys = encrypted_keys
+                api_key.enabled = True
+                api_key.updated_at = datetime.utcnow()
+            else:
+                api_key = ProviderAPIKey(provider=provider, keys=encrypted_keys, enabled=True, updated_at=datetime.utcnow())
+                session.add(api_key)
+
+            session.commit()
             return True
         except Exception as e:
+            session.rollback()
             print(f"Error saving API keys: {e}")
             return False
 
     def get_api_keys(self, provider: str) -> Optional[Dict[str, Any]]:
         """Get decrypted API keys for a provider."""
-        # If MongoDB is not available, use environment variables
-        if not self.mongodb_available:
-            result = self._get_env_keys(provider)
-            if result:
-                result["source"] = "environment"
-            return result
+        session = self.SessionLocal()
 
         try:
-            document = self.collection.find_one({"provider": provider})
-            if not document:
-                # Fallback to environment variables
-                result = self._get_env_keys(provider)
-                if result:
-                    result["source"] = "environment"
-                return result
+            api_key = session.query(ProviderAPIKey).filter_by(provider=provider).first()
+
+            if not api_key:
+                return None
+
+            # Debug: Print raw key data
+            print(f"DEBUG: api_key.keys type = {type(api_key.keys)}, value = {api_key.keys}")
 
             # Decrypt sensitive values
             decrypted_keys = {}
-            for key, value in document.get("keys", {}).items():
-                if value and any(sensitive in key.lower() for sensitive in ["key", "secret", "token", "password"]):
-                    decrypted_keys[key] = self.decrypt_value(str(value))
+            keys_dict = api_key.keys if isinstance(api_key.keys, dict) else {}
+            for key, value in keys_dict.items():
+                print(
+                    f"DEBUG: decrypting key = {key}, value type = {type(value)}, encrypted value = {value[:50] if isinstance(value, str) else 'not a string'}"
+                )
+                if value and any(sensitive in key.lower() for sensitive in ["secret", "token", "password"]):
+                    try:
+                        decrypted_keys[key] = self.decrypt_value(value)
+                        print(
+                            f"DEBUG: decrypted {key} = {decrypted_keys[key][:20] if len(decrypted_keys[key]) > 20 else decrypted_keys[key]}"
+                        )
+                    except Exception as e:
+                        print(f"DEBUG: decryption failed for {key}: {e}")
+                        decrypted_keys[key] = value
                 else:
                     decrypted_keys[key] = value
 
             # Check if provider is properly configured
-            is_configured = self.validate_provider_config(document["provider"], decrypted_keys)
+            is_configured = self.validate_provider_config(api_key.provider, decrypted_keys)
 
             return {
-                "provider": document["provider"],
+                "provider": api_key.provider,
                 "keys": decrypted_keys,
-                "enabled": document.get("enabled", True),
+                "enabled": api_key.enabled,
                 "configured": is_configured,
-                "updated_at": document.get("updated_at"),
-                "source": "mongodb",
+                "updated_at": api_key.updated_at.isoformat() if api_key.updated_at else None,
             }
         except Exception as e:
-            print(f"Error getting API keys from MongoDB, falling back to environment: {e}")
-            result = self._get_env_keys(provider)
-            if result:
-                result["source"] = "environment"
-            return result
+            print(f"Error getting API keys from PostgreSQL: {e}")
+            return None
 
     def _get_env_keys(self, provider: str) -> Optional[Dict[str, Any]]:
         """Get API keys from environment variables."""
-        import os
-
         if provider == "aws":
             access_key = os.getenv("AWS_ACCESS_KEY_ID")
             secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
@@ -140,7 +161,7 @@ class APIKeysManager:
                     "access_key_id": access_key,
                     "secret_access_key": secret_key,
                     "region": os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
-                    "s3_bucket_name": os.getenv("S3_BUCKET_NAME", "speecher-rafal-app"),
+                    "s3_bucket_name": os.getenv("S3_BUCKET_NAME", "speacher-rafal-app"),
                 }
                 return {
                     "provider": "aws",
@@ -163,19 +184,21 @@ class APIKeysManager:
         elif provider == "gcp":
             credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
             if credentials_path and os.path.exists(credentials_path):
+                import json
+
                 with open(credentials_path, "r") as f:
                     keys = {
                         "credentials_json": f.read(),
                         "project_id": os.getenv("GCP_PROJECT_ID"),
-                        "gcs_bucket_name": os.getenv("GCP_BUCKET_NAME", "speecher-gcp"),
+                        "gcs_bucket_name": os.getenv("GCP_BUCKET_NAME", "speacher-gcp"),
                     }
-                    return {
-                        "provider": "gcp",
-                        "keys": keys,
-                        "enabled": True,
-                        "configured": self.validate_provider_config("gcp", keys),
-                        "updated_at": None,
-                    }
+                return {
+                    "provider": "gcp",
+                    "keys": keys,
+                    "enabled": True,
+                    "configured": self.validate_provider_config("gcp", keys),
+                    "updated_at": None,
+                }
 
         return None
 
@@ -198,41 +221,14 @@ class APIKeysManager:
 
     def get_all_providers(self) -> list:
         """Get all configured providers with their status."""
-        # If MongoDB is not available, check environment variables
-        if not self.mongodb_available:
-            providers = []
-            for provider in ["aws", "azure", "gcp"]:
-                env_keys = self._get_env_keys(provider)
-                if env_keys:
-                    is_properly_configured = self.validate_provider_config(provider, env_keys["keys"])
-                    providers.append(
-                        {
-                            "provider": provider,
-                            "enabled": is_properly_configured,
-                            "configured": is_properly_configured,
-                            "updated_at": None,
-                            "source": "environment",
-                        }
-                    )
-                else:
-                    providers.append(
-                        {
-                            "provider": provider,
-                            "enabled": False,
-                            "configured": False,
-                            "updated_at": None,
-                            "source": None,
-                        }
-                    )
-            return providers
+        session = self.SessionLocal()
 
         try:
             providers = []
-            for doc in self.collection.find({}, {"provider": 1, "keys": 1, "enabled": 1, "updated_at": 1}):
-                # Decrypt keys to validate configuration
+            for doc in session.query(ProviderAPIKey).filter_by(enabled=True).all():
                 decrypted_keys = {}
-                for key, value in doc.get("keys", {}).items():
-                    if value and any(sensitive in key.lower() for sensitive in ["key", "secret", "token", "password"]):
+                for key, value in doc.to_dict().get("keys", {}).items():
+                    if value and any(sensitive in key.lower() for sensitive in ["secret", "token", "password"]):
                         try:
                             decrypted_keys[key] = self.decrypt_value(value)
                         except Exception:
@@ -240,67 +236,23 @@ class APIKeysManager:
                     else:
                         decrypted_keys[key] = value
 
-                # Check if provider is properly configured
-                is_properly_configured = self.validate_provider_config(doc["provider"], decrypted_keys)
+                is_properly_configured = self.validate_provider_config(doc.provider, decrypted_keys)
 
                 providers.append(
                     {
-                        "provider": doc["provider"],
-                        "enabled": doc.get("enabled", True)
-                        and is_properly_configured,  # Only enabled if properly configured
-                        "configured": is_properly_configured,
-                        "updated_at": doc.get("updated_at"),
-                        "source": "mongodb",
+                        "provider": doc.provider,
+                        "enabled": doc.enabled,
+                        "configured": is_properly_configured and doc.enabled,
+                        "updated_at": doc.updated_at.isoformat() if doc.updated_at else None,
+                        "source": "postgresql",
                     }
                 )
 
-            # Add unconfigured providers
-            all_providers = ["aws", "azure", "gcp"]
-            configured = [p["provider"] for p in providers]
-            for provider in all_providers:
-                if provider not in configured:
-                    # Check environment variables for unconfigured providers
-                    env_keys = self._get_env_keys(provider)
-                    if env_keys:
-                        is_properly_configured = self.validate_provider_config(provider, env_keys["keys"])
-                        providers.append(
-                            {
-                                "provider": provider,
-                                "enabled": is_properly_configured,
-                                "configured": is_properly_configured,
-                                "updated_at": None,
-                                "source": "environment",
-                            }
-                        )
-                    else:
-                        providers.append(
-                            {
-                                "provider": provider,
-                                "enabled": False,
-                                "configured": False,
-                                "updated_at": None,
-                                "source": None,
-                            }
-                        )
-
-            return providers
-        except Exception as e:
-            print(f"Error getting providers from MongoDB, using environment fallback: {e}")
-            # Fallback to environment-only mode
-            providers = []
+            # Add environment-only providers
             for provider in ["aws", "azure", "gcp"]:
                 env_keys = self._get_env_keys(provider)
                 if env_keys:
-                    is_properly_configured = self.validate_provider_config(provider, env_keys["keys"])
-                    providers.append(
-                        {
-                            "provider": provider,
-                            "enabled": is_properly_configured,
-                            "configured": is_properly_configured,
-                            "updated_at": None,
-                            "source": "environment",
-                        }
-                    )
+                    providers.append(env_keys)
                 else:
                     providers.append(
                         {
@@ -308,7 +260,27 @@ class APIKeysManager:
                             "enabled": False,
                             "configured": False,
                             "updated_at": None,
-                            "source": None,
+                            "source": "environment",
+                        }
+                    )
+
+            return providers
+        except Exception as e:
+            print(f"Error getting providers from PostgreSQL, using environment fallback: {e}")
+            # Fallback to environment-only mode
+            providers = []
+            for provider in ["aws", "azure", "gcp"]:
+                env_keys = self._get_env_keys(provider)
+                if env_keys:
+                    providers.append(env_keys)
+                else:
+                    providers.append(
+                        {
+                            "provider": provider,
+                            "enabled": False,
+                            "configured": False,
+                            "updated_at": None,
+                            "source": "environment",
                         }
                     )
             return providers
@@ -316,17 +288,28 @@ class APIKeysManager:
     def delete_api_keys(self, provider: str) -> bool:
         """Delete API keys for a provider."""
         try:
-            result = self.collection.delete_one({"provider": provider})
-            return result.deleted_count > 0
+            session = self.SessionLocal()
+            result = session.query(ProviderAPIKey).filter_by(provider=provider).delete()
+            session.commit()
+            return result > 0
         except Exception as e:
+            session.rollback()
             print(f"Error deleting API keys: {e}")
             return False
 
     def toggle_provider(self, provider: str, enabled: bool) -> bool:
         """Enable or disable a provider."""
         try:
-            result = self.collection.update_one({"provider": provider}, {"$set": {"enabled": enabled}})
-            return result.modified_count > 0
+            session = self.SessionLocal()
+            api_key = session.query(ProviderAPIKey).filter_by(provider=provider).first()
+
+            if api_key:
+                api_key.enabled = enabled
+                api_key.updated_at = datetime.utcnow()
+                session.commit()
+                return True
+            return False
         except Exception as e:
+            session.rollback()
             print(f"Error toggling provider: {e}")
             return False

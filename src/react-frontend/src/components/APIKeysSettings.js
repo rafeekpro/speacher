@@ -23,16 +23,16 @@ import {
 } from '@mui/material';
 import {
   Save as SaveIcon,
-  Visibility as VisibilityIcon,
-  VisibilityOff as VisibilityOffIcon,
-  Delete as DeleteIcon,
-  ExpandMore as ExpandMoreIcon,
-  ExpandLess as ExpandLessIcon,
-  CloudQueue as CloudIcon,
+  Eye as VisibilityIcon,
+  EyeOff as VisibilityOffIcon,
+  Trash2 as DeleteIcon,
+  ChevronDown as ExpandMoreIcon,
+  ChevronUp as ExpandLessIcon,
+  Cloud as CloudIcon,
   CheckCircle as CheckIcon,
-  Warning as WarningIcon,
-  VpnKey as KeyIcon
-} from '@mui/icons-material';
+  AlertTriangle as WarningIcon,
+  Key as KeyIcon
+} from 'lucide-react';
 import axios from 'axios';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
@@ -166,11 +166,11 @@ const APIKeysSettings = () => {
     const isEnabled = providers.find(p => p.provider === provider)?.enabled;
     
     if (isConfigured && isEnabled) {
-      return <CheckIcon color="success" />;
+      return <CheckIcon className="text-green-500" size={20} />;
     } else if (isConfigured) {
-      return <WarningIcon color="warning" />;
+      return <WarningIcon className="text-yellow-500" size={20} />;
     }
-    return <CloudIcon color="disabled" />;
+    return <CloudIcon className="text-gray-400" size={20} />;
   };
 
   const getProviderColor = (provider) => {
@@ -195,7 +195,7 @@ const APIKeysSettings = () => {
                 onChange={(e) => handleInputChange('aws', 'access_key_id', e.target.value)}
                 variant="outlined"
                 InputProps={{
-                  startAdornment: <InputAdornment position="start"><KeyIcon /></InputAdornment>,
+                  startAdornment: <InputAdornment position="start"><KeyIcon size={20} /></InputAdornment>,
                 }}
               />
             </Grid>
@@ -208,11 +208,11 @@ const APIKeysSettings = () => {
                 onChange={(e) => handleInputChange('aws', 'secret_access_key', e.target.value)}
                 variant="outlined"
                 InputProps={{
-                  startAdornment: <InputAdornment position="start"><KeyIcon /></InputAdornment>,
+                  startAdornment: <InputAdornment position="start"><KeyIcon size={20} /></InputAdornment>,
                   endAdornment: (
                     <InputAdornment position="end">
                       <IconButton onClick={() => togglePasswordVisibility('aws_secret')}>
-                        {showPassword.aws_secret ? <VisibilityOffIcon /> : <VisibilityIcon />}
+                        {showPassword.aws_secret ? <VisibilityOffIcon size={20} /> : <VisibilityIcon size={20} />}
                       </IconButton>
                     </InputAdornment>
                   ),
@@ -255,11 +255,11 @@ const APIKeysSettings = () => {
                 onChange={(e) => handleInputChange('azure', 'subscription_key', e.target.value)}
                 variant="outlined"
                 InputProps={{
-                  startAdornment: <InputAdornment position="start"><KeyIcon /></InputAdornment>,
+                  startAdornment: <InputAdornment position="start"><KeyIcon size={20} /></InputAdornment>,
                   endAdornment: (
                     <InputAdornment position="end">
                       <IconButton onClick={() => togglePasswordVisibility('azure_key')}>
-                        {showPassword.azure_key ? <VisibilityOffIcon /> : <VisibilityIcon />}
+                        {showPassword.azure_key ? <VisibilityOffIcon size={20} /> : <VisibilityIcon size={20} />}
                       </IconButton>
                     </InputAdornment>
                   ),
@@ -390,7 +390,7 @@ const APIKeysSettings = () => {
                     onClick={() => setExpandedProvider(isExpanded ? null : provider)}
                     edge="end"
                   >
-                    {isExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                    {isExpanded ? <ExpandLessIcon size={20} /> : <ExpandMoreIcon size={20} />}
                   </IconButton>
                 </ListItemSecondaryAction>
               </ListItem>
@@ -404,7 +404,7 @@ const APIKeysSettings = () => {
                   <Box sx={{ mt: 3, display: 'flex', gap: 2, alignItems: 'center' }}>
                     <Button
                       variant="contained"
-                      startIcon={<SaveIcon />}
+                      startIcon={<SaveIcon size={20} />}
                       onClick={() => handleSaveKeys(provider)}
                       disabled={loading}
                       sx={{
@@ -422,7 +422,7 @@ const APIKeysSettings = () => {
                         <Button
                           variant="outlined"
                           color="error"
-                          startIcon={<DeleteIcon />}
+                          startIcon={<DeleteIcon size={20} />}
                           onClick={() => handleDeleteKeys(provider)}
                           disabled={loading}
                         >

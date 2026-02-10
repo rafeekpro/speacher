@@ -1,19 +1,14 @@
 {
-  "name": "speecher-frontend",
+  "name": "speacher-frontend",
   "version": "0.1.0",
   "private": true,
   "dependencies": {
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
-    "@mui/icons-material": "^7.3.2",
-    "@mui/lab": "^7.0.0-beta.17",
     "@mui/material": "^7.3.2",
-    "@mui/x-charts": "^8.11.1",
-    "@mui/x-data-grid": "^8.11.1",
     "@testing-library/jest-dom": "^5.17.0",
     "@testing-library/react": "^13.4.0",
     "@testing-library/user-event": "^13.5.0",
-    "@types/react-router-dom": "^5.3.3",
     "axios": "^1.6.2",
     "lucide-react": "^0.292.0",
     "react": "^18.2.0",
@@ -26,9 +21,18 @@
   },
   "scripts": {
     "start": "react-scripts start",
-    "build": "react-scripts build",
+    "build": "GENERATE_SOURCEMAP=false INLINE_RUNTIME_CHUNK=false react-scripts build",
+    "build:prod": "NODE_ENV=production GENERATE_SOURCEMAP=false INLINE_RUNTIME_CHUNK=false BUILD_PATH=build react-scripts build",
+    "build:analyze": "npm run build:prod && npx serve -s build -l 3000",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "test:coverage": "react-scripts test --coverage --watchAll=false",
+    "test:ci": "CI=true react-scripts test --coverage --watchAll=false --passWithNoTests",
+    "eject": "react-scripts eject",
+    "lint": "eslint src/ --ext .js,.jsx --max-warnings 0",
+    "lint:fix": "eslint src/ --ext .js,.jsx --fix",
+    "serve": "serve -s build -l 3000",
+    "test:visual": "npx playwright test tests/visual/visual.spec.ts",
+    "test:visual:update": "npx playwright test tests/visual/visual.spec.ts --update-snapshots"
   },
   "eslintConfig": {
     "extends": [
@@ -50,11 +54,14 @@
   },
   "proxy": "http://localhost:8000",
   "devDependencies": {
+    "@playwright/test": "^1.55.0",
     "@types/jest": "^30.0.0",
     "@types/node": "^24.3.1",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
+    "@types/react-router-dom": "^5.3.3",
     "ajv": "^8.17.1",
-    "typescript": "^5.9.2"
+    "serve": "^14.2.5",
+    "typescript": "^4.9.5"
   }
 }

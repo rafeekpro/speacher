@@ -2,25 +2,25 @@ services:
   # PostgreSQL database for production
   postgres:
     image: postgres:15-alpine
-    container_name: speecher-postgres
+    container_name: speacher-postgres
     restart: always
     ports:
       - "5432:5432"
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-speecher}
+      POSTGRES_USER: ${POSTGRES_USER:-speacher}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB:-speecher}
+      POSTGRES_DB: ${POSTGRES_DB:-speacher}
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-speecher} -d ${POSTGRES_DB:-speecher}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-speacher} -d ${POSTGRES_DB:-speacher}"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
     networks:
-      - speecher-network
+      - speacher-network
     deploy:
       resources:
         limits:
@@ -33,7 +33,7 @@ services:
   # Redis for caching/sessions
   redis:
     image: redis:7-alpine
-    container_name: speecher-redis
+    container_name: speacher-redis
     restart: always
     ports:
       - "6379:6379"
@@ -46,7 +46,7 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - speecher-network
+      - speacher-network
     deploy:
       resources:
         limits:
@@ -58,20 +58,20 @@ services:
 
   # Backend API
   backend:
-    image: ${REGISTRY:-docker.io}/${IMAGE_PREFIX:-speecher}/backend:${VERSION:-latest}
+    image: ${REGISTRY:-docker.io}/${IMAGE_PREFIX:-speacher}/backend:${VERSION:-latest}
     build:
       context: .
       dockerfile: docker/backend.Dockerfile
       cache_from:
-        - ${REGISTRY:-docker.io}/${IMAGE_PREFIX:-speecher}/backend:latest
-        - ${REGISTRY:-docker.io}/${IMAGE_PREFIX:-speecher}/backend:builder
-    container_name: speecher-backend
+        - ${REGISTRY:-docker.io}/${IMAGE_PREFIX:-speacher}/backend:latest
+        - ${REGISTRY:-docker.io}/${IMAGE_PREFIX:-speacher}/backend:builder
+    container_name: speacher-backend
     restart: always
     ports:
       - "8000:8000"
     environment:
       # Database configuration
-      DATABASE_URL: postgresql://${POSTGRES_USER:-speecher}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-speecher}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-speacher}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-speacher}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       
       # Application settings
@@ -113,7 +113,7 @@ services:
       retries: 3
       start_period: 40s
     networks:
-      - speecher-network
+      - speacher-network
     deploy:
       resources:
         limits:
@@ -130,16 +130,16 @@ services:
 
   # Frontend served by nginx
   frontend:
-    image: ${REGISTRY:-docker.io}/${IMAGE_PREFIX:-speecher}/frontend:${VERSION:-latest}
+    image: ${REGISTRY:-docker.io}/${IMAGE_PREFIX:-speacher}/frontend:${VERSION:-latest}
     build:
       context: .
       dockerfile: docker/react.Dockerfile
       cache_from:
-        - ${REGISTRY:-docker.io}/${IMAGE_PREFIX:-speecher}/frontend:latest
-        - ${REGISTRY:-docker.io}/${IMAGE_PREFIX:-speecher}/frontend:builder
+        - ${REGISTRY:-docker.io}/${IMAGE_PREFIX:-speacher}/frontend:latest
+        - ${REGISTRY:-docker.io}/${IMAGE_PREFIX:-speacher}/frontend:builder
       args:
         - REACT_APP_API_URL=${REACT_APP_API_URL:-/api}
-    container_name: speecher-frontend
+    container_name: speacher-frontend
     restart: always
     ports:
       - "80:80"
@@ -157,7 +157,7 @@ services:
       retries: 3
       start_period: 40s
     networks:
-      - speecher-network
+      - speacher-network
     deploy:
       resources:
         limits:
@@ -174,7 +174,7 @@ volumes:
     driver: local
 
 networks:
-  speecher-network:
+  speacher-network:
     driver: bridge
     ipam:
       config:

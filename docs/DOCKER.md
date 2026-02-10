@@ -16,10 +16,10 @@ nano .env
 
 ```bash
 # Build and run all containers
-docker-compose up --build
+docker compose up --build
 
 # Or run in background
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
 ### 3. Access Application
@@ -102,31 +102,31 @@ docker-compose up -d --build
 
 ```bash
 # Stop all containers
-docker-compose down
+docker compose down
 
 # Stop and remove volumes (WARNING: deletes data!)
-docker-compose down -v
+docker compose down -v
 
 # View logs
-docker-compose logs -f
+docker compose logs -f
 
 # Logs for specific service
-docker-compose logs -f backend
-docker-compose logs -f frontend
-docker-compose logs -f mongo
+docker compose logs -f backend
+docker compose logs -f frontend
+docker compose logs -f mongo
 
 # Restart service
-docker-compose restart backend
+docker compose restart backend
 
 # Scale (run multiple backend instances)
-docker-compose up -d --scale backend=3
+docker compose up -d --scale backend=3
 ```
 
 ## 📊 Monitoring
 
 ```bash
 # Container status
-docker-compose ps
+docker compose ps
 
 # Resource usage
 docker stats
@@ -146,10 +146,10 @@ curl http://localhost:8000/stats
 ### Backend cannot connect to MongoDB
 ```bash
 # Check MongoDB logs
-docker-compose logs mongo
+docker compose logs mongo
 
 # Restart MongoDB
-docker-compose restart mongo
+docker compose restart mongo
 ```
 
 ### Frontend not connecting to backend
@@ -158,8 +158,8 @@ docker-compose restart mongo
 curl http://localhost:8000/health
 
 # Check logs
-docker-compose logs backend
-docker-compose logs frontend
+docker compose logs backend
+docker compose logs frontend
 ```
 
 ### Cloud permission errors

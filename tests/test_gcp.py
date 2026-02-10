@@ -3,16 +3,16 @@
 Unit tests for the GCP module which handles interactions with Google Cloud Platform services.
 """
 
+import os
 import unittest
 import uuid
-import os
-from unittest.mock import patch, MagicMock, mock_open
-
-# Import test utilities
-from tests.test_utils import setup_test_data_dir, create_sample_wav_file, get_sample_transcription_data
+from unittest.mock import MagicMock, mock_open, patch
 
 # Import the module to test
 import src.speecher.gcp as gcp
+
+# Import test utilities
+from tests.test_utils import create_sample_wav_file, get_sample_transcription_data, setup_test_data_dir
 
 
 class TestGCPModule(unittest.TestCase):

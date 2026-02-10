@@ -1,0 +1,153 @@
+# RBAC Configuration for GitHub Actions Self-Hosted Runners on Kubernetes
+# 
+# This file grants necessary permissions for CI/CD operations.
+# Apply with: kubectl apply -f rbac-runner-permissions.yaml
+#
+# Security Note: These permissions are scoped to specific namespaces
+# and follow the principle of least privilege.
+
+---
+# ServiceAccount for GitHub runners (if not already exists)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-runner
+  namespace: github-runner
+
+---
+# Role for managing CI/CD resources in the github-runner namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: github-runner-ci
+  namespace: github-runner
+rules:
+  # Pod management
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/exec", "pods/portforward"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
+  
+  # ConfigMap management for build contexts
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "get", "list", "delete", "patch", "update"]
+  
+  # Job management for Kaniko builds
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch", "update"]
+  
+  # Service management for test environments
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get", "list", "delete"]
+  
+  # Secret access (read-only for pulling images)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+
+---
+# RoleBinding to grant permissions to the service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-runner-ci-binding
+  namespace: github-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: github-runner-ci
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: github-runner
+  - kind: ServiceAccount
+    name: github-runner
+    namespace: github-runner
+
+---
+# ClusterRole for limited cluster-wide operations (optional)
+# Only needed if you want runners to create test namespaces
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: github-runner-namespace-creator
+rules:
+  # Namespace creation for isolated test environments
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["create", "get", "list", "delete"]
+    # Note: You can add resourceNames here to limit which namespaces can be created
+    # e.g., resourceNames: ["ci-*", "test-*", "build-*"]
+
+---
+# ClusterRoleBinding (optional - only if namespace creation is needed)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: github-runner-namespace-creator-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: github-runner-namespace-creator
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: github-runner
+  - kind: ServiceAccount
+    name: github-runner
+    namespace: github-runner
+
+---
+# ResourceQuota to prevent resource exhaustion (recommended)
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: github-runner-quota
+  namespace: github-runner
+spec:
+  hard:
+    requests.cpu: "20"
+    requests.memory: "40Gi"
+    limits.cpu: "40"
+    limits.memory: "80Gi"
+    persistentvolumeclaims: "10"
+    pods: "50"
+    configmaps: "100"
+
+---
+# NetworkPolicy to isolate CI/CD workloads (optional but recommended)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: github-runner-network-policy
+  namespace: github-runner
+spec:
+  podSelector:
+    matchLabels:
+      app: github-runner
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: github-runner
+  egress:
+    - to:
+        - podSelector: {}  # Allow communication within namespace
+    - to:
+        - namespaceSelector: {}  # Allow external communication
+      ports:
+        - protocol: TCP
+          port: 443  # HTTPS
+        - protocol: TCP
+          port: 80   # HTTP
+        - protocol: TCP
+          port: 53   # DNS
+        - protocol: UDP
+          port: 53   # DNS
+        - protocol: TCP
+          port: 27017  # MongoDB

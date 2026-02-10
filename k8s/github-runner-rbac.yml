@@ -1,0 +1,341 @@
+# GitHub Runner RBAC Configuration for Hybrid Kubernetes Approach
+# This configuration enables GitHub Actions runners to orchestrate Kubernetes jobs
+# without having container runtimes installed on the runners themselves.
+#
+# Security Model: Minimal required permissions following least-privilege principle
+# Namespace: github-runner (dedicated namespace for runner operations)
+# ServiceAccount: github-runner (aligned with GitHub runner service)
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: github-runner
+  labels:
+    purpose: github-actions
+    environment: ci-cd
+    security.policy: restricted
+  annotations:
+    description: "Dedicated namespace for GitHub Actions runners with hybrid Kubernetes approach"
+    created-by: "github-runner-rbac-setup"
+    security-policy: "minimal-permissions"
+
+---
+# ServiceAccount for GitHub Actions runners
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-runner
+  namespace: github-runner
+  labels:
+    app: github-runner
+    component: ci-cd
+    managed-by: rbac-configuration
+  annotations:
+    description: "Service account for GitHub Actions runners orchestrating Kubernetes jobs"
+    security-policy: "least-privilege"
+
+---
+# Role with minimal required permissions for GitHub runner operations
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: github-runner
+  namespace: github-runner
+  labels:
+    app: github-runner
+    component: rbac
+    security-level: minimal
+  annotations:
+    description: "Minimal permissions for GitHub runners to orchestrate container builds and tests"
+    security-review: "2025-09-12"
+rules:
+# Job management for Kaniko builds and test executions
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["create", "get", "list", "watch", "delete"]
+  resourceNames: []
+
+# Pod management for job execution and debugging
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["create", "get", "list", "watch", "delete"]
+  resourceNames: []
+
+# Pod logs access for debugging and CI output
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get", "list"]
+  resourceNames: []
+
+# Port forwarding for debugging (required by CRITICAL CI/CD RULES)
+- apiGroups: [""]
+  resources: ["pods/portforward"]
+  verbs: ["create", "get"]
+  resourceNames: []
+
+# ConfigMap management for build context and configuration
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["create", "get", "list", "update", "patch", "delete"]
+  resourceNames: []
+
+# Secret access for registry credentials and build secrets
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+  resourceNames: []
+
+# Service management for temporary services during testing
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["create", "get", "list", "delete"]
+  resourceNames: []
+
+# PersistentVolumeClaim for build caches and temporary storage
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["create", "get", "list", "delete"]
+  resourceNames: []
+
+# Events read access for debugging job failures
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["get", "list"]
+  resourceNames: []
+
+---
+# RoleBinding to grant permissions to the ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: github-runner
+  namespace: github-runner
+  labels:
+    app: github-runner
+    component: rbac
+  annotations:
+    description: "Binds github-runner ServiceAccount to github-runner Role"
+    security-policy: "least-privilege"
+subjects:
+- kind: ServiceAccount
+  name: github-runner
+  namespace: github-runner
+roleRef:
+  kind: Role
+  name: github-runner
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# NetworkPolicy for security isolation (optional but recommended)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: github-runner-netpol
+  namespace: github-runner
+  labels:
+    app: github-runner
+    component: security
+  annotations:
+    description: "Network isolation for GitHub runner pods"
+spec:
+  podSelector:
+    matchLabels:
+      app: github-runner
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow ingress from other pods in the same namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: github-runner
+  egress:
+  # Allow egress to Kubernetes API server
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 6443
+  # Allow egress to container registries
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+  # Allow DNS resolution
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+
+---
+# ResourceQuota to prevent resource exhaustion
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: github-runner-quota
+  namespace: github-runner
+  labels:
+    app: github-runner
+    component: resource-management
+  annotations:
+    description: "Resource limits for GitHub runner operations"
+spec:
+  hard:
+    requests.cpu: "4"
+    requests.memory: 8Gi
+    limits.cpu: "8"
+    limits.memory: 16Gi
+    persistentvolumeclaims: "10"
+    pods: "20"
+    services: "5"
+    secrets: "10"
+    configmaps: "20"
+    count/jobs.batch: "10"
+
+---
+# LimitRange for default resource limits on pods
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: github-runner-limits
+  namespace: github-runner
+  labels:
+    app: github-runner
+    component: resource-management
+  annotations:
+    description: "Default resource limits for pods in github-runner namespace"
+spec:
+  limits:
+  - type: Pod
+    max:
+      cpu: "2"
+      memory: 4Gi
+    min:
+      cpu: "100m"
+      memory: 128Mi
+  - type: Container
+    default:
+      cpu: "500m"
+      memory: 1Gi
+    defaultRequest:
+      cpu: "200m"
+      memory: 256Mi
+    max:
+      cpu: "2"
+      memory: 4Gi
+    min:
+      cpu: "100m"
+      memory: 128Mi
+
+---
+# ConfigMap with setup instructions and usage examples
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: github-runner-setup
+  namespace: github-runner
+  labels:
+    app: github-runner
+    component: documentation
+  annotations:
+    description: "Setup instructions and usage examples for GitHub runners"
+data:
+  setup-instructions.md: |
+    # GitHub Runner RBAC Setup Instructions
+    
+    ## Prerequisites
+    1. Kubernetes cluster with RBAC enabled
+    2. kubectl configured with cluster-admin permissions
+    3. GitHub Actions self-hosted runners configured
+    
+    ## Deployment
+    ```bash
+    kubectl apply -f k8s/github-runner-rbac.yml
+    ```
+    
+    ## Verification
+    ```bash
+    # Check namespace creation
+    kubectl get namespace github-runner
+    
+    # Verify ServiceAccount
+    kubectl get serviceaccount github-runner -n github-runner
+    
+    # Check RBAC permissions
+    kubectl auth can-i create jobs --as=system:serviceaccount:github-runner:github-runner -n github-runner
+    kubectl auth can-i get pods --as=system:serviceaccount:github-runner:github-runner -n github-runner
+    kubectl auth can-i create configmaps --as=system:serviceaccount:github-runner:github-runner -n github-runner
+    ```
+    
+    ## Usage in GitHub Actions
+    ```yaml
+    - name: Build with Kaniko in Kubernetes
+      run: |
+        kubectl create job kaniko-build-${{ github.run_id }} \
+          --image=gcr.io/kaniko-project/executor:latest \
+          --serviceaccount=github-runner \
+          -n github-runner \
+          -- --context=git://github.com/${{ github.repository }}.git#${{ github.sha }} \
+          --dockerfile=Dockerfile \
+          --destination=myregistry/myapp:${{ github.sha }}
+    ```
+    
+    ## Security Notes
+    - ServiceAccount follows least-privilege principle
+    - Network policies restrict pod-to-pod communication
+    - Resource quotas prevent resource exhaustion
+    - All operations are namespace-scoped
+    
+  kaniko-example.yml: |
+    # Example Kaniko job template for GitHub Actions
+    apiVersion: batch/v1
+    kind: Job
+    metadata:
+      name: kaniko-build-${GITHUB_RUN_ID}
+      namespace: github-runner
+      labels:
+        app: kaniko
+        build-id: "${GITHUB_RUN_ID}"
+        pr-number: "${PR_NUMBER}"
+    spec:
+      ttlSecondsAfterFinished: 3600
+      template:
+        spec:
+          serviceAccountName: github-runner
+          restartPolicy: Never
+          containers:
+          - name: kaniko
+            image: gcr.io/kaniko-project/executor:v1.9.0
+            args:
+            - --context=git://github.com/${GITHUB_REPOSITORY}.git#${GITHUB_SHA}
+            - --dockerfile=Dockerfile
+            - --destination=${REGISTRY}/${IMAGE}:${GITHUB_SHA}
+            - --cache=true
+            - --cache-ttl=24h
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "1"
+            env:
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /secret/kaniko-secret
+            volumeMounts:
+            - name: kaniko-secret
+              mountPath: /secret
+              readOnly: true
+          volumes:
+          - name: kaniko-secret
+            secret:
+              secretName: kaniko-secret

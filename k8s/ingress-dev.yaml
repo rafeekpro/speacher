@@ -1,0 +1,60 @@
+---
+# Development Frontend Ingress for local.pro4.es
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: speecher-frontend-dev
+  namespace: speecher
+  annotations:
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    traefik.ingress.kubernetes.io/router.middlewares: redirect-to-https@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: speacher.local.pro4.es
+    http:
+      paths:
+      - backend:
+          service:
+            name: frontend
+            port:
+              number: 8080
+        path: /
+        pathType: Prefix
+---
+# Development Backend Ingress for local.pro4.es
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: speecher-backend-dev
+  namespace: speecher
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: speecher-strip-api-prefix@kubernetescrd
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: traefik
+  rules:
+  - host: speacher-api.local.pro4.es
+    http:
+      paths:
+      - backend:
+          service:
+            name: backend
+            port:
+              number: 8000
+        path: /api
+        pathType: Prefix
+      - backend:
+          service:
+            name: backend
+            port:
+              number: 8000
+        path: /ws
+        pathType: Prefix
+      - backend:
+          service:
+            name: backend
+            port:
+              number: 8000
+        path: /docs
+        pathType: Prefix

@@ -1,0 +1,16 @@
+# Ignore secrets with real values
+*-secrets.yaml
+*-secrets.yml
+secrets/
+
+# Ignore kubeconfig files
+kubeconfig
+*.kubeconfig
+
+# Ignore backup files
+*.bak
+*~
+
+# Ignore temp files
+*.tmp
+temp/

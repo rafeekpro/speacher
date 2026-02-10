@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: speecher-prod
+  labels:
+    name: speecher-prod
+    environment: production

@@ -5,6 +5,7 @@ Unit tests for backend main module endpoints.
 
 import unittest
 from unittest.mock import patch
+
 from fastapi.testclient import TestClient
 
 # Import the app

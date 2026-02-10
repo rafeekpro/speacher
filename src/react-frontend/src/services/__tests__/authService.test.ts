@@ -129,12 +129,17 @@ describe('authService', () => {
     });
 
     it('should clear tokens even if API call fails', async () => {
+      // Mock console.error to avoid test output pollution
+      const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation();
+      
       mockedTokenStorage.getAccessToken.mockReturnValueOnce('access-token-123');
       mockedAxios.post.mockRejectedValueOnce(new Error('Network error'));
 
       await authService.logout();
 
       expect(mockedTokenStorage.clearTokens).toHaveBeenCalled();
+      
+      consoleErrorSpy.mockRestore();
     });
 
     it('should clear tokens even without access token', async () => {
