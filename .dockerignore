@@ -48,6 +48,9 @@ config/.env.example
 .env.example
 .envrc
 
+# EXCEPTION: Allow root .env for React build-time configuration
+!.env
+
 # Package managers
 poetry.lock
 uv.lock

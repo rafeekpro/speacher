@@ -1,0 +1,5 @@
+FROM rla/speecher-backend:latest
+
+# Copy only updated files
+COPY src/backend/main.py /app/src/backend/main.py
+COPY src/backend/cloud_wrappers.py /app/src/backend/cloud_wrappers.py

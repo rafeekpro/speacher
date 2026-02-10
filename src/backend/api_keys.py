@@ -20,9 +20,9 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-# SQLAlchemy model for API Keys
-class APIKey(Base):
-    __tablename__ = "api_keys"
+# SQLAlchemy model for Provider API Keys (cloud credentials)
+class ProviderAPIKey(Base):
+    __tablename__ = "provider_api_keys"
 
     provider = Column(String(50), primary_key=True)
     keys = Column(JSON, nullable=True)
@@ -88,14 +88,14 @@ class APIKeysManager:
                     encrypted_keys[key] = value
 
             # Check if provider exists
-            api_key = session.query(APIKey).filter_by(provider=provider).first()
+            api_key = session.query(ProviderAPIKey).filter_by(provider=provider).first()
 
             if api_key:
                 api_key.keys = encrypted_keys
                 api_key.enabled = True
                 api_key.updated_at = datetime.utcnow()
             else:
-                api_key = APIKey(provider=provider, keys=encrypted_keys, enabled=True, updated_at=datetime.utcnow())
+                api_key = ProviderAPIKey(provider=provider, keys=encrypted_keys, enabled=True, updated_at=datetime.utcnow())
                 session.add(api_key)
 
             session.commit()
@@ -110,7 +110,7 @@ class APIKeysManager:
         session = self.SessionLocal()
 
         try:
-            api_key = session.query(APIKey).filter_by(provider=provider).first()
+            api_key = session.query(ProviderAPIKey).filter_by(provider=provider).first()
 
             if not api_key:
                 return None
@@ -225,7 +225,7 @@ class APIKeysManager:
 
         try:
             providers = []
-            for doc in session.query(APIKey).filter_by(enabled=True).all():
+            for doc in session.query(ProviderAPIKey).filter_by(enabled=True).all():
                 decrypted_keys = {}
                 for key, value in doc.to_dict().get("keys", {}).items():
                     if value and any(sensitive in key.lower() for sensitive in ["secret", "token", "password"]):
@@ -289,7 +289,7 @@ class APIKeysManager:
         """Delete API keys for a provider."""
         try:
             session = self.SessionLocal()
-            result = session.query(APIKey).filter_by(provider=provider).delete()
+            result = session.query(ProviderAPIKey).filter_by(provider=provider).delete()
             session.commit()
             return result > 0
         except Exception as e:
@@ -301,7 +301,7 @@ class APIKeysManager:
         """Enable or disable a provider."""
         try:
             session = self.SessionLocal()
-            api_key = session.query(APIKey).filter_by(provider=provider).first()
+            api_key = session.query(ProviderAPIKey).filter_by(provider=provider).first()
 
             if api_key:
                 api_key.enabled = enabled

@@ -308,3 +308,48 @@ d: dev ## Shortcut for 'make dev'
 t: test ## Shortcut for 'make test'
 l: dev-logs ## Shortcut for 'make dev-logs'
 s: dev-stop ## Shortcut for 'make dev-stop'
+# Kubernetes deployment
+.PHONY: k8s-deploy k8s-undeploy k8s-status k8s-logs k8s-port-forward
+
+k8s-deploy: ## Deploy to Kubernetes cluster
+	@echo "🚀 Deploying to Kubernetes..."
+	@./k8s/deploy.sh
+
+k8s-undeploy: ## Remove from Kubernetes cluster
+	@echo "🗑️  Removing from Kubernetes..."
+	@./k8s/undeploy.sh
+
+k8s-status: ## Show Kubernetes deployment status
+	@echo "📊 Kubernetes Status:"
+	@echo ""
+	@echo "📍 Pods:"
+	@kubectl get pods -n speecher
+	@echo ""
+	@echo "🌐 Services:"
+	@kubectl get svc -n speecher
+	@echo ""
+	@echo "🔗 Ingress:"
+	@kubectl get ingress -n speecher
+	@echo ""
+	@echo "📈 HPA:"
+	@kubectl get hpa -n speecher
+
+k8s-logs-backend: ## Show backend logs
+	@kubectl logs -n speecher deployment/backend -f
+
+k8s-logs-frontend: ## Show frontend logs
+	@kubectl logs -n speecher deployment/frontend -f
+
+k8s-port-forward-frontend: ## Port forward frontend to localhost:8080
+	@echo "🔗 Forwarding frontend to http://localhost:8080"
+	@kubectl port-forward -n speecher svc/frontend 8080:8080
+
+k8s-port-forward-backend: ## Port forward backend to localhost:8000
+	@echo "🔗 Forwarding backend to http://localhost:8000"
+	@kubectl port-forward -n speecher svc/backend 8000:8000
+
+k8s-restart-backend: ## Restart backend deployment
+	@kubectl rollout restart -n speecher deployment/backend
+
+k8s-restart-frontend: ## Restart frontend deployment
+	@kubectl rollout restart -n speecher deployment/frontend
