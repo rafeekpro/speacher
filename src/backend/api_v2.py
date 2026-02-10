@@ -21,6 +21,7 @@ from src.backend.auth import (
     validate_password_strength,
     verify_password,
 )
+from src.backend.users_db import user_db
 from src.backend.database import (
     add_recording_to_project,
     add_tags_to_project,
@@ -55,9 +56,9 @@ from src.backend.models import (
 )
 
 # Create routers
-auth_router = APIRouter(prefix="/api/auth", tags=["authentication"])
-users_router = APIRouter(prefix="/api/users", tags=["users"])
-projects_router = APIRouter(prefix="/api/projects", tags=["projects"])
+auth_router = APIRouter(prefix="/auth", tags=["authentication"])
+users_router = APIRouter(prefix="/users", tags=["users"])
+projects_router = APIRouter(prefix="/projects", tags=["projects"])
 
 # ============================================================================
 # AUTHENTICATION ENDPOINTS
@@ -68,7 +69,7 @@ projects_router = APIRouter(prefix="/api/projects", tags=["projects"])
 async def register(request: UserRegisterRequest):
     """Register a new user"""
     try:
-        user = create_user(email=request.email, password=request.password, full_name=request.full_name)
+        user = await create_user(email=request.email, password=request.password, full_name=request.full_name)
         return UserResponse(
             id=user.id,
             email=user.email,
@@ -93,13 +94,18 @@ async def login(request: UserLoginRequest):
         )
 
     # Authenticate user
-    user = authenticate_user(request.email, request.password)
+    user = await authenticate_user(request.email, request.password)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
 
-    # Create tokens
-    access_token = create_access_token({"sub": user.email})
-    refresh_token = create_refresh_token({"sub": user.email})
+    # Create tokens with user info in payload
+    access_token = create_access_token({
+        "sub": user.email,
+        "email": user.email,
+        "name": user.full_name,
+        "user_id": str(user.id)
+    })
+    refresh_token = await create_refresh_token({"sub": user.email}, user_id=user.id)
 
     return UserLoginResponse(
         access_token=access_token,
@@ -130,8 +136,18 @@ async def refresh_token(request: TokenRefreshRequest):
         if not email:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
 
-        # Create new access token
-        access_token = create_access_token({"sub": email})
+        # Get user from database to include in new token
+        user = await user_db.get_user_by_email(email)
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+        # Create new access token with user info
+        access_token = create_access_token({
+            "sub": user.email,
+            "email": user.email,
+            "name": user.full_name,
+            "user_id": str(user.id)
+        })
 
         return TokenRefreshResponse(access_token=access_token, token_type="bearer", expires_in=1800)
     except HTTPException:
@@ -143,7 +159,7 @@ async def refresh_token(request: TokenRefreshRequest):
 @auth_router.post("/logout")
 async def logout(current_user: UserResponse = Depends(get_current_user)):
     """Logout user and revoke tokens"""
-    revoke_all_refresh_tokens(current_user.email)
+    await revoke_all_refresh_tokens(current_user.id)
     return {"message": "Successfully logged out"}
 
 
@@ -242,7 +258,7 @@ async def change_password(request: PasswordChangeRequest, current_user: UserResp
 @users_router.post("/api-keys", response_model=ApiKeyResponse, status_code=status.HTTP_201_CREATED)
 async def create_user_api_key(request: ApiKeyCreateRequest, current_user: UserResponse = Depends(require_auth)):
     """Create a new API key"""
-    key, api_key_db = create_api_key(user_id=current_user.id, name=request.name, expires_at=request.expires_at)
+    key, api_key_db = await create_api_key(user_id=current_user.id, name=request.name, expires_at=request.expires_at)
 
     return ApiKeyResponse(
         id=api_key_db.id,
@@ -307,7 +323,7 @@ async def delete_account(password: str, current_user: UserResponse = Depends(get
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Password is incorrect")
 
     # Delete user and all associated data
-    if delete_user(current_user.id):
+    if await delete_user(current_user.id):
         return {"message": "Account deleted successfully"}
     else:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete account")

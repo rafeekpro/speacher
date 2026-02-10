@@ -104,7 +104,12 @@ app = FastAPI(
 # Add CORS middleware for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
+    allow_origins=[
+        "http://speacher.local.pro4.es",
+        "http://speacher-api.local.pro4.es",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -128,7 +133,7 @@ async def get_providers():
     return ["aws", "azure", "gcp"]
 
 
-@app.post("/api/transcribe", response_model=TranscriptionResponse)
+@app.post("/transcribe", response_model=TranscriptionResponse)
 async def transcribe(
     file: UploadFile = File(...),
     provider: str = Form("aws"),
@@ -291,7 +296,7 @@ async def transcribe(
             pass
 
 
-@app.post("/api/transcribe/async", response_model=Dict[str, str])
+@app.post("/transcribe/async", response_model=Dict[str, str])
 async def transcribe_async(
     file: UploadFile = File(...),
     provider: str = Form("aws"),
@@ -511,21 +516,15 @@ async def process_aws_transcription(
     upload_result = service.upload_file_to_s3(file_path, s3_bucket_name, s3_key)
     logger.debug(f"Upload result: {upload_result}")
 
-    # upload_file_to_s3 returns S3 URI string: "s3://bucket-name/object-name"
-    # Extract bucket name from the result
+    # Verify upload succeeded
     if not upload_result.startswith("s3://"):
         raise Exception("Failed to upload file to S3")
-
-    # Parse S3 URI to get bucket name
-    s3_uri_parts = upload_result.replace("s3://", "").split("/")
-    bucket_name = s3_uri_parts[0]
-    object_key = "/".join(s3_uri_parts[1:])
 
     # Start transcription job
     job_name = f"speacher-{uuid.uuid4()}"
 
-    # Build media file URI
-    media_file_uri = f"s3://{bucket_name}/{filename}"
+    # Use the S3 URI from upload result (includes user_id prefix)
+    media_file_uri = upload_result
 
     # Determine media format from filename extension
     media_format = os.path.splitext(filename)[1].lstrip('.')
@@ -637,19 +636,15 @@ async def process_aws_transcription_async(
     s3_key = f"{current_user.id}/{filename}"
     upload_result = service.upload_file_to_s3(file_path, s3_bucket_name, s3_key)
 
+    # Verify upload succeeded
     if not upload_result.startswith("s3://"):
         raise Exception("Failed to upload file to S3")
-
-    # Parse S3 URI to get bucket name
-    s3_uri_parts = upload_result.replace("s3://", "").split("/")
-    bucket_name = s3_uri_parts[0]
-    object_key = "/".join(s3_uri_parts[1:])
 
     # Start transcription job
     job_name = f"speacher-{uuid.uuid4()}"
 
-    # Build media file URI
-    media_file_uri = f"s3://{bucket_name}/{filename}"
+    # Use the S3 URI from upload result (includes user_id prefix)
+    media_file_uri = upload_result
 
     # Determine media format from filename extension
     media_format = os.path.splitext(filename)[1].lstrip('.')
@@ -799,7 +794,7 @@ async def process_gcp_transcription(
     return result
 
 
-@app.get("/api/history")
+@app.get("/history")
 async def get_transcription_history(
     search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
@@ -833,7 +828,7 @@ async def get_transcription_history(
     return result
 
 
-@app.get("/api/transcription/{transcription_id}")
+@app.get("/transcription/{transcription_id}")
 async def get_transcription(
     transcription_id: str,
     current_user: UserDB = Depends(require_auth),
@@ -851,7 +846,7 @@ async def get_transcription(
     return result
 
 
-@app.delete("/api/transcription/{transcription_id}")
+@app.delete("/transcription/{transcription_id}")
 async def delete_transcription(
     transcription_id: str,
     current_user: UserDB = Depends(require_auth),
@@ -989,13 +984,13 @@ async def transcribe_websocket(websocket: WebSocket, job_id: str):
         await websocket.close()
 
 
-@app.get("/api/stats")
+@app.get("/stats")
 async def get_statistics():
     """Get usage statistics."""
     return transcription_manager.get_statistics()
 
 
-@app.get("/api/files")
+@app.get("/files")
 async def list_s3_files(
     # Tymczasowo bez Depends(require_auth) - testujemy funkcjonalność
     authorization: str = Header(None, alias="Authorization"),
@@ -1084,7 +1079,7 @@ async def list_s3_files(
         raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
 
 
-@app.delete("/api/files/{filename}")
+@app.delete("/files/{filename}")
 async def delete_s3_file(
     filename: str,
     current_user: UserDB = Depends(require_auth),
@@ -1128,7 +1123,7 @@ async def delete_s3_file(
         raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
 
 
-@app.post("/api/files/{filename}/retranscribe")
+@app.post("/files/{filename}/retranscribe")
 async def retranscribe_file(
     filename: str,
     language: str = Form("en-US"),
@@ -1157,7 +1152,8 @@ async def retranscribe_file(
         )
 
         s3_bucket_name = keys.get("s3_bucket_name")
-        media_file_uri = f"s3://{s3_bucket_name}/{filename}"
+        # File was stored with user_id prefix, need to add it back
+        media_file_uri = f"s3://{s3_bucket_name}/{current_user.id}/{filename}"
 
         # Determine media format from filename extension
         import os
@@ -1393,7 +1389,7 @@ class APIKeyRequest(BaseModel):
     keys: Dict[str, Any]
 
 
-@app.post("/api/keys/{provider}")
+@app.post("/keys/{provider}")
 async def save_api_keys(provider: str, request: APIKeyRequest):
     """Save or update API keys for a provider."""
     success = api_keys_manager.save_api_keys(provider, request.keys)
@@ -1403,7 +1399,7 @@ async def save_api_keys(provider: str, request: APIKeyRequest):
         raise HTTPException(status_code=500, detail="Failed to save API keys")
 
 
-@app.get("/api/keys/{provider}")
+@app.get("/keys/{provider}")
 async def get_api_keys(provider: str):
     """Get API keys for a provider (masked for security)."""
     keys_data = api_keys_manager.get_api_keys(provider)
@@ -1430,13 +1426,13 @@ async def get_api_keys(provider: str):
         return {"provider": provider, "keys": {}, "enabled": False, "configured": False}
 
 
-@app.get("/api/keys")
+@app.get("/keys")
 async def get_all_providers():
     """Get all providers with their configuration status."""
     return api_keys_manager.get_all_providers()
 
 
-@app.delete("/api/keys/{provider}")
+@app.delete("/keys/{provider}")
 async def delete_api_keys(provider: str):
     """Delete API keys for a provider."""
     success = api_keys_manager.delete_api_keys(provider)
@@ -1446,7 +1442,7 @@ async def delete_api_keys(provider: str):
         raise HTTPException(status_code=404, detail="Provider not found")
 
 
-@app.put("/api/keys/{provider}/toggle")
+@app.put("/keys/{provider}/toggle")
 async def toggle_provider(provider: str, enabled: bool = True):
     """Enable or disable a provider."""
     success = api_keys_manager.toggle_provider(provider, enabled)
