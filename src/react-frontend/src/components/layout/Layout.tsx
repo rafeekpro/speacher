@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Sidebar from './Sidebar';
+import Footer from './Footer';
 import { useAuth } from '../../contexts/AuthContext';
 
 interface LayoutProps {
@@ -172,6 +173,9 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
         >
           {children}
         </main>
+
+        {/* Footer */}
+        <Footer />
       </div>
     </div>
   );
