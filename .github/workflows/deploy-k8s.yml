@@ -150,7 +150,6 @@ jobs:
             # Apply in order
             kubectl apply -f namespace.yml
             kubectl apply -f secrets.yml
-            kubectl apply -f mongodb.yml
             kubectl apply -f backend.yml
             kubectl apply -f frontend.yml
 
