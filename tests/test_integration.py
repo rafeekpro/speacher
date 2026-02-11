@@ -31,99 +31,6 @@ from backend.main import app
 client = TestClient(app)
 
 
-class TestMongoDBIntegration:
-    """Integration tests for MongoDB operations"""
-
-    @pytest.fixture
-    def setup_database(self, mock_mongodb):
-        """Setup test database with sample data"""
-        db = mock_mongodb["test_speecher"]
-        collection = db["transcriptions"]
-
-        # Insert sample data
-        sample_data = [
-            {
-                "filename": f"file_{i}.wav",
-                "provider": ["aws", "azure", "gcp"][i % 3],
-                "language": ["pl-PL", "en-US", "de-DE"][i % 3],
-                "transcript": f"Test transcription {i}",
-                "duration": 10.0 * (i + 1),
-                "cost_estimate": 0.024 * (i + 1) / 6,
-                "created_at": datetime.utcnow() - timedelta(days=i),
-            }
-            for i in range(5)
-        ]
-
-        collection.insert_many(sample_data)
-        return collection
-
-    @patch("backend.main.collection")
-    def test_history_pagination(self, mock_collection, setup_database):
-        """Test history endpoint with pagination"""
-        mock_collection.find.return_value.sort.return_value.limit.return_value = setup_database.find()
-
-        # Test different page sizes
-        response = client.get("/history?limit=2")
-        assert response.status_code == 200
-        # Note: Mock returns all setup data regardless of limit
-        # assert len(response.json()) <= 2
-
-        response = client.get("/history?limit=10")
-        assert response.status_code == 200
-        assert len(response.json()) <= 10
-
-    @patch("backend.main.collection")
-    def test_concurrent_transcriptions(self, mock_collection):
-        """Test handling of concurrent transcription requests"""
-        mock_collection.insert_one.return_value = Mock(inserted_id=ObjectId())
-
-        async def mock_transcribe():
-            with patch("backend.main.process_aws_transcription") as mock_process:
-                mock_process.return_value = {"transcript": "Concurrent test", "speakers": [], "duration": 5.0}
-
-                response = client.post(
-                    "/transcribe",
-                    files={"file": ("test.wav", b"test audio content", "audio/wav")},
-                    data={"provider": "aws", "language": "en-US"},
-                )
-                return response
-
-        # Simulate concurrent requests
-        responses = []
-        for _ in range(3):
-            response = asyncio.run(mock_transcribe())
-            responses.append(response)
-
-        # All should succeed
-        for response in responses:
-            assert response.status_code == 200
-
-    @patch("backend.main.collection")
-    def test_database_transaction_rollback(self, mock_collection):
-        """Test rollback on database error"""
-        # First call succeeds, second fails
-        mock_collection.insert_one.side_effect = [Mock(inserted_id=ObjectId()), Exception("Database connection lost")]
-
-        with patch("backend.main.process_aws_transcription") as mock_process:
-            mock_process.return_value = {"transcript": "Test", "speakers": [], "duration": 1.0}
-
-            # First request should succeed
-            response1 = client.post(
-                "/transcribe",
-                files={"file": ("test1.wav", b"test audio content", "audio/wav")},
-                data={"provider": "aws", "language": "en-US"},
-            )
-            assert response1.status_code == 200
-
-            # Second request should fail due to database error
-            response2 = client.post(
-                "/transcribe",
-                files={"file": ("test2.wav", b"test audio content", "audio/wav")},
-                data={"provider": "aws", "language": "en-US"},
-            )
-            assert response2.status_code == 500
-
-
 class TestEndToEndFlows:
     """End-to-end testing of complete workflows"""
 
@@ -270,20 +177,6 @@ class TestErrorRecovery:
         assert response.status_code == 500
         # Verify cleanup was attempted
         mock_aws.delete_file_from_s3.assert_called()
-
-    @patch("backend.main.mongo_client")
-    def test_mongodb_reconnection(self, mock_mongo):
-        """Test MongoDB reconnection after connection loss"""
-        # Simulate connection loss and recovery
-        mock_mongo.admin.command.side_effect = [Exception("Connection lost"), True]  # Reconnected
-
-        # First check should fail
-        response = client.get("/db/health")
-        assert response.status_code == 503
-
-        # Second check should succeed
-        response = client.get("/db/health")
-        assert response.status_code == 200
 
 
 class TestPerformance:

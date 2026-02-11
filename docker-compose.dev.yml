@@ -22,29 +22,6 @@ services:
     networks:
       - speacher-dev-network
 
-  # MongoDB for development (if still needed)
-  mongodb:
-    image: mongo:7.0
-    container_name: speacher-mongodb-dev
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: speacher_admin_pass
-      MONGO_INITDB_DATABASE: speacher_dev
-    volumes:
-      - mongodb_data:/data/db
-      - ./docker/init-mongo.js:/docker-entrypoint-initdb.d/init-mongo.js:ro
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/speacher_dev --quiet
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    networks:
-      - speacher-dev-network
-
   # Redis for caching/sessions
   redis:
     image: redis:7-alpine
@@ -75,7 +52,6 @@ services:
     environment:
       # Database configuration
       DATABASE_URL: postgresql://speacher:speacher_dev_pass@postgres:5432/speacher_dev
-      MONGODB_URI: mongodb://admin:speacher_admin_pass@mongodb:27017/speacher_dev?authSource=admin
       REDIS_URL: redis://redis:6379/0
       
       # Application settings
@@ -123,8 +99,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      mongodb:
-        condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
@@ -143,42 +117,31 @@ services:
     build:
       context: .
       dockerfile: docker/react.dev.Dockerfile
+      target: production  # Use production stage with nginx
     container_name: speacher-react-dev
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3000:8080"  # Map to nginx port in production stage
     environment:
       # React environment variables
       REACT_APP_API_URL: http://localhost:8000
       REACT_APP_WS_URL: ws://localhost:8000
       REACT_APP_ENVIRONMENT: development
-      
-      # Development settings
-      CHOKIDAR_USEPOLLING: "true"  # Enable polling for file changes in Docker
-      WATCHPACK_POLLING: "true"
-      WDS_SOCKET_PORT: 3000
-      
-      # Node settings
-      NODE_ENV: development
-      
-    volumes:
-      # Mount source code for hot-reload
-      - ./src/react-frontend:/app:cached
-      # Anonymous volumes to prevent host node_modules from overriding container
-      - /app/node_modules
-    depends_on:
-      backend:
-        condition: service_healthy
+
+    labels:
+      # Traefik labels for routing
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`speacher.local.pro4.es`)"
+      - "traefik.http.routers.frontend.entrypoints=web"
+      - "traefik.http.services.frontend.loadbalancer.server.port=8080"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 30s
     networks:
       - speacher-dev-network
-    stdin_open: true  # Keep STDIN open for interactive debugging
-    tty: true  # Allocate a pseudo-TTY
 
   # Nginx reverse proxy for development (optional, simulates production)
   nginx:
@@ -220,7 +183,6 @@ services:
     container_name: speacher-tests-dev
     environment:
       DATABASE_URL: postgresql://speacher:speacher_dev_pass@postgres:5432/speacher_test
-      MONGODB_URI: mongodb://admin:speacher_admin_pass@mongodb:27017/speacher_test?authSource=admin
       REDIS_URL: redis://redis:6379/1
       BACKEND_URL: http://backend:8000
       PYTHONUNBUFFERED: 1
@@ -235,8 +197,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      mongodb:
-        condition: service_healthy
       redis:
         condition: service_healthy
       backend:
@@ -249,8 +209,6 @@ services:
 
 volumes:
   postgres_data:
-    driver: local
-  mongodb_data:
     driver: local
   redis_data:
     driver: local

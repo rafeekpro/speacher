@@ -470,8 +470,8 @@ class TestErrorHandling:
         assert "Failed to upload" in response.json()["detail"]
 
     @patch("backend.main.collection")
-    def test_mongodb_insert_failure(self, mock_collection):
-        """Test handling of MongoDB insert failure"""
+    def test_database_insert_failure(self, mock_collection):
+        """Test handling of database insert failure"""
         mock_collection.insert_one.side_effect = Exception("Database error")
 
         with patch("backend.main.process_aws_transcription") as mock_process:

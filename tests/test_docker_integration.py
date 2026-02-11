@@ -16,8 +16,8 @@ import requests
 
 # Configuration from environment
 BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
-MONGODB_URI = os.getenv(
-    "MONGODB_URI", "mongodb://speecher_user:speecher_pass@localhost:27017/speecher_test?authSource=speecher"
+DATABASE_URL = os.getenv(
+    "DATABASE_URL", "postgresql://speecher_user:speecher_pass@localhost:5432/speecher_test"
 )
 
 
@@ -244,8 +244,8 @@ class TestHistory:
 class TestDockerEnvironment:
     """Test Docker-specific functionality."""
 
-    def test_mongodb_connection(self):
-        """Verify MongoDB is accessible from backend."""
+    def test_database_connection(self):
+        """Verify database is accessible from backend."""
         response = requests.get(f"{BACKEND_URL}/db/health")
         assert response.status_code == 200
 
@@ -265,7 +265,7 @@ class TestDockerEnvironment:
         assert response.status_code == 200
         data = response.json()
 
-        # Should have MongoDB connection
+        # Should have database connection
         assert "provider_status" in data or "error" not in data
 
 

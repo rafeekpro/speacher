@@ -6,10 +6,9 @@ import os
 import sys
 import tempfile
 from datetime import datetime
+import uuid
 
-import mongomock
 import pytest
-from bson.objectid import ObjectId
 from fastapi.testclient import TestClient
 
 # Add src to path
@@ -17,24 +16,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 
 @pytest.fixture
-def mock_mongodb():
-    """Create a mock MongoDB client"""
-    return mongomock.MongoClient()
-
-
-@pytest.fixture
-def mock_collection(mock_mongodb):
-    """Create a mock MongoDB collection"""
-    db = mock_mongodb["test_db"]
-    collection = db["test_collection"]
-    return collection
-
-
-@pytest.fixture
 def sample_transcription():
     """Sample transcription data"""
     return {
-        "_id": ObjectId(),
+        "id": str(uuid.uuid4()),
         "filename": "sample.wav",
         "provider": "aws",
         "language": "pl-PL",
@@ -164,9 +149,6 @@ def mock_gcp_speech_response():
 def mock_env_variables(monkeypatch):
     """Set mock environment variables for testing"""
     env_vars = {
-        "MONGODB_URI": "mongodb://test:27017",
-        "MONGODB_DB": "test_speecher",
-        "MONGODB_COLLECTION": "test_transcriptions",
         "S3_BUCKET_NAME": "test-bucket",
         "AWS_ACCESS_KEY_ID": "test_key",
         "AWS_SECRET_ACCESS_KEY": "test_secret",
@@ -196,7 +178,7 @@ def multiple_transcriptions():
     for i in range(10):
         transcriptions.append(
             {
-                "_id": ObjectId(),
+                "id": str(uuid.uuid4()),
                 "filename": f"audio_{i}.wav",
                 "provider": providers[i % 3],
                 "language": languages[i % 3],
