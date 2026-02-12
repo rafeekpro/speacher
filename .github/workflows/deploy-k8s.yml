@@ -93,6 +93,37 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y wireguard
 
+      - name: Install WireGuard
+        run: |
+          echo "📦 Installing WireGuard..."
+          sudo apt-get update
+          sudo apt-get install -y wireguard
+
+      - name: Start WireGuard
+        run: |
+          echo "🚀 Starting WireGuard tunnel..."
+          sudo wg-quick up wg0
+
+      - name: Verify tunnel
+        id: verify-tunnel
+        run: |
+          echo "🔍 Verifying tunnel connectivity..."
+          echo "Testing ping to ${{ env.SERVER_WG_IP }}..."
+          if ping -c 3 -W 2 ${{ env.SERVER_WG_IP }}; then
+            echo "✅ Tunnel established successfully"
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Tunnel failed to establish"
+            echo "success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Show WireGuard status
+        if: always()
+        run: |
+          echo "📊 WireGuard Status:"
+          sudo wg show wg0
+
       - name: Configure WireGuard
         run: |
           echo "🔧 Configuring WireGuard interface..."
@@ -105,7 +136,7 @@ jobs:
           [Peer]
           PublicKey = ${{ secrets.SERVER_PUBLIC_KEY }}
           Endpoint = ${{ secrets.SERVER_PUBLIC_IP || '10.0.0.5' }}:51820
-          AllowedIPs = 10.0.0.1/32, 10.0.0.0/24
+          AllowedIPs = 10.0.1/32, 10.0.0.0/24
           PersistentKeepalive = 25
           EOF
 
