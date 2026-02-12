@@ -18,9 +18,6 @@ RUN npm ci --only=production --legacy-peer-deps && \
 COPY src/react-frontend/package*.json ./
 RUN npm ci --legacy-peer-deps
 
-# Copy root .env for production build (takes precedence over .env.production)
-COPY .env src/react-frontend/.env.production.local
-
 # Copy source code
 COPY src/react-frontend/ ./
 
