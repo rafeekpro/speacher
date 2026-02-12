@@ -102,7 +102,7 @@ jobs:
           DNS = 10.0.0.1
 
           [Peer]
-          PublicKey = ${{ secrets.SERVER_PUBLIC_KEY }}
+          PublicKey = ${{ secrets.WG_PEER_PUBLIC_KEY }}
           Endpoint = ${{ secrets.SERVER_PUBLIC_IP || '10.0.0.5' }}:51820
           AllowedIPs = 10.0.0.1/32, 10.0.0.0/24
           PersistentKeepalive = 25
