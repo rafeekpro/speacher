@@ -99,6 +99,7 @@ app = FastAPI(
     title="Speacher Transcription API",
     description="Multi-cloud audio transcription service with speaker diarization",
     version="1.2.0",
+    root_path="/api"
 )
 
 # Add CORS middleware for frontend

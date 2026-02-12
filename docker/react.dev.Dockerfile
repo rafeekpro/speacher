@@ -69,30 +69,30 @@ FROM nginx:alpine AS production
 # Install curl for health checks
 RUN apk add --no-cache curl
 
-# Copy custom nginx configuration
-COPY docker/nginx.prod.conf /etc/nginx/conf.d/default.conf
+# Copy custom nginx configuration (simple config for Traefik setup)
+COPY docker/nginx.simple.conf /etc/nginx/conf.d/default.conf
+
+# Fix nginx PID path for non-root user - remove pid directive completely
+RUN grep -v '^[[:space:]]*pid[[:space:]].*;[[:space:]]*$' /etc/nginx/nginx.conf > /tmp/nginx.conf && mv /tmp/nginx.conf /etc/nginx/nginx.conf
 
 # Copy built React app from builder stage
 COPY --from=builder /app/build /usr/share/nginx/html
 
-# Create non-root user
+# Create non-root user with proper permissions
 RUN addgroup -g 1000 appuser && \
     adduser -D -u 1000 -G appuser appuser && \
-    chown -R appuser:appuser /usr/share/nginx/html && \
-    chown -R appuser:appuser /var/cache/nginx && \
-    chown -R appuser:appuser /var/log/nginx && \
-    touch /var/run/nginx.pid && \
-    chown appuser:appuser /var/run/nginx.pid
+    mkdir -p /var/cache/nginx /var/log/nginx /var/run/nginx && \
+    chown -R appuser:appuser /usr/share/nginx/html /var/cache/nginx /var/log/nginx /var/run/nginx
 
 # Switch to non-root user
 USER appuser
 
-# Expose port
-EXPOSE 80
+# Expose port (using 8080 for local development)
+EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost/ || exit 1
+    CMD curl -f http://localhost:8080/health || exit 1
 
-# Start nginx
-CMD ["nginx", "-g", "daemon off;"]
+# Start nginx with custom PID location for non-root user
+CMD ["nginx", "-g", "daemon off; pid /tmp/nginx.pid;"]
