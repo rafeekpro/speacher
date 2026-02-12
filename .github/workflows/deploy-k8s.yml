@@ -48,7 +48,7 @@ jobs:
           echo "date=$(date -u +%Y%m%d%H%M%S)" >> $GITHUB_OUTPUT
 
       - name: Build backend image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/backend.Dockerfile
@@ -56,19 +56,15 @@ jobs:
           push: false
           tags: speacher-backend:${{ env.IMAGE_TAG }}
           outputs: type=docker,dest=/tmp/backend-image.tar
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Build frontend image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/react.Dockerfile
           push: false
           tags: speacher-frontend:${{ env.IMAGE_TAG }}
           outputs: type=docker,dest=/tmp/frontend-image.tar
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Upload backend image artifact
         uses: actions/upload-artifact@v4
