@@ -24,7 +24,7 @@ on:
         default: 'latest'
 
 env:
-  DEPLOY_HOST: rla@10.0.0.5
+  SERVER_WG_IP: 10.0.0.1
   IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
 
 jobs:
@@ -84,9 +84,63 @@ jobs:
           path: /tmp/frontend-image.tar
           retention-days: 1
 
+  setup-wireguard:
+    name: Setup WireGuard Tunnel
+    runs-on: ubuntu-latest
+    outputs:
+      tunnel_ready: ${{ steps.verify-tunnel.outputs.success }}
+
+    steps:
+      - name: Install WireGuard
+        run: |
+          echo "📦 Installing WireGuard..."
+          sudo apt-get update
+          sudo apt-get install -y wireguard
+
+      - name: Configure WireGuard
+        run: |
+          echo "🔧 Configuring WireGuard interface..."
+          cat <<EOF | sudo tee /etc/wireguard/wg0.conf
+          [Interface]
+          PrivateKey = ${{ secrets.WG_PRIVATE_KEY }}
+          Address = 10.0.0.2/32
+          DNS = 10.0.0.1
+
+          [Peer]
+          PublicKey = ${{ secrets.SERVER_PUBLIC_KEY }}
+          Endpoint = ${{ secrets.SERVER_PUBLIC_IP || '10.0.0.5' }}:51820
+          AllowedIPs = 10.0.0.1/32, 10.0.0.0/24
+          PersistentKeepalive = 25
+          EOF
+
+      - name: Start WireGuard
+        run: |
+          echo "🚀 Starting WireGuard tunnel..."
+          sudo wg-quick up wg0
+
+      - name: Verify tunnel
+        id: verify-tunnel
+        run: |
+          echo "🔍 Verifying tunnel connectivity..."
+          echo "Testing ping to ${{ env.SERVER_WG_IP }}..."
+          if ping -c 3 -W 2 ${{ env.SERVER_WG_IP }}; then
+            echo "✅ Tunnel established successfully"
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Tunnel failed to establish"
+            echo "success=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      - name: Show WireGuard status
+        if: always()
+        run: |
+          echo "📊 WireGuard Status:"
+          sudo wg show wg0
+
   deploy:
     name: Deploy to Kubernetes
-    needs: build
+    needs: [build, setup-wireguard]
     runs-on: ubuntu-latest
     environment: production
 
@@ -106,73 +160,75 @@ jobs:
           name: frontend-image
           path: /tmp
 
-      - name: Setup SSH key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
-
-      - name: Add host to known_hosts
+      - name: Load images through tunnel
         run: |
-          mkdir -p ~/.ssh
-          ssh-keyscan -H 10.0.0.5 >> ~/.ssh/known_hosts
+          echo "📦 Loading images into containerd through WireGuard tunnel..."
 
-      - name: Transfer images to remote host
-        run: |
-          echo "Combining and compressing images..."
+          # Combine images
           cat /tmp/backend-image.tar /tmp/frontend-image.tar | gzip > /tmp/speacher-images.tar.gz
 
-          echo "Transferring to remote host..."
-          scp /tmp/speacher-images.tar.gz ${{ env.DEPLOY_HOST }}:/tmp/
+          # Transfer images through tunnel
+          scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
+            /tmp/speacher-images.tar.gz root@${{ env.SERVER_WG_IP }}:/tmp/
 
-          echo "Loading images on remote..."
-          ssh ${{ env.DEPLOY_HOST }} << 'EOF'
-            # Load images into containerd (k3s)
-            gunzip -c /tmp/speacher-images.tar.gz | sudo k3s ctr images import - || \
-            # Fallback: Load into Docker
+          # Load images on remote
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 root@${{ env.SERVER_WG_IP }} << 'EOF'
+            echo "Importing images to containerd..."
+            gunzip -c /tmp/speacher-images.tar.gz | k3s ctr images import - || \
             gunzip -c /tmp/speacher-images.tar.gz | docker load
 
-            # Tag images
-            sudo k3s ctr images tag docker.io/library/speacher-backend:${{ env.IMAGE_TAG }} speacher-backend:${{ env.IMAGE_TAG }} 2>/dev/null || true
-            sudo k3s ctr images tag docker.io/library/speacher-frontend:${{ env.IMAGE_TAG }} speacher-frontend:${{ env.IMAGE_TAG }} 2>/dev/null || true
+            echo "Tagging images..."
+            k3s ctr images tag docker.io/library/speacher-backend:${{ env.IMAGE_TAG }} speacher-backend:${{ env.IMAGE_TAG }} 2>/dev/null || true
+            k3s ctr images tag docker.io/library/speacher-frontend:${{ env.IMAGE_TAG }} speacher-frontend:${{ env.IMAGE_TAG }} 2>/dev/null || true
 
             rm -f /tmp/speacher-images.tar.gz
+
+            echo "✅ Images loaded successfully"
           EOF
 
       - name: Deploy Kubernetes manifests
         run: |
-          echo "Copying manifests..."
-          scp -r devops/k8s ${{ env.DEPLOY_HOST }}:/tmp/speacher-k8s
+          echo "🚀 Deploying Kubernetes manifests through tunnel..."
 
-          echo "Applying manifests..."
-          ssh ${{ env.DEPLOY_HOST }} << 'EOF'
+          # Copy manifests
+          scp -o StrictHostKeyChecking=no -r devops/k8s root@${{ env.SERVER_WG_IP }}:/tmp/speacher-k8s
+
+          # Apply manifests
+          ssh -o StrictHostKeyChecking=no root@${{ env.SERVER_WG_IP }} << 'EOF'
             cd /tmp/speacher-k8s
 
-            # Apply in order
+            echo "Applying namespace..."
             kubectl apply -f namespace.yml
+
+            echo "Applying secrets..."
             kubectl apply -f secrets.yml
+
+            echo "Applying backend deployment..."
             kubectl apply -f backend.yml
+
+            echo "Applying frontend deployment..."
             kubectl apply -f frontend.yml
 
-            # Update image tags
+            echo "Updating image tags..."
             kubectl set image deployment/backend backend=speacher-backend:${{ env.IMAGE_TAG }} -n speacher
             kubectl set image deployment/frontend frontend=speacher-frontend:${{ env.IMAGE_TAG }} -n speacher
 
-            # Wait for rollout
+            echo "Waiting for rollout..."
             kubectl rollout status deployment/backend -n speacher --timeout=180s
             kubectl rollout status deployment/frontend -n speacher --timeout=180s
 
-            # Show status
+            echo ""
             echo "=== Deployment Status ==="
             kubectl get pods -n speacher
             kubectl get svc -n speacher
 
-            # Cleanup
             rm -rf /tmp/speacher-k8s
           EOF
 
       - name: Verify deployment
         run: |
-          ssh ${{ env.DEPLOY_HOST }} << 'EOF'
+          echo "✅ Verifying deployment through tunnel..."
+          ssh -o StrictHostKeyChecking=no root@${{ env.SERVER_WG_IP }} << 'EOF'
             echo "Checking pod health..."
             kubectl get pods -n speacher -o wide
 
@@ -180,16 +236,30 @@ jobs:
             echo "Checking services..."
             kubectl get svc -n speacher
 
-            # Simple health check
+            echo ""
+            echo "Health check..."
             BACKEND_POD=$(kubectl get pods -n speacher -l app=backend -o jsonpath='{.items[0].metadata.name}')
             if [ -n "$BACKEND_POD" ]; then
-              kubectl exec -n speacher $BACKEND_POD -- curl -s http://localhost:8000/health || echo "Health check skipped"
+              kubectl exec -n speacher $BACKEND_POD -- curl -s http://localhost:8000/health || echo "Health check endpoint not available"
             fi
           EOF
 
+  teardown-wireguard:
+    name: Teardown WireGuard Tunnel
+    needs: [setup-wireguard, deploy]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Stop WireGuard
+        run: |
+          echo "🔻 Tearing down WireGuard tunnel..."
+          sudo wg-quick down wg0
+          echo "✅ Tunnel stopped"
+
   notify:
     name: Notify
-    needs: [build, deploy]
+    needs: [setup-wireguard, deploy, teardown-wireguard]
     runs-on: ubuntu-latest
     if: always()
 
@@ -198,9 +268,12 @@ jobs:
         run: |
           if [ "${{ needs.deploy.result }}" == "success" ]; then
             echo "✅ Deployment successful!"
-            echo "Backend: http://10.0.0.5:8000"
-            echo "Frontend: http://10.0.0.5:3000"
+            echo "Backend: Available through WireGuard tunnel"
+            echo "Frontend: Available through WireGuard tunnel"
+            echo "Tunnel: 10.0.0.1 <-> 10.0.0.2"
           else
             echo "❌ Deployment failed!"
+            echo "Check the WireGuard troubleshooting guide:"
+            echo "https://github.com/your-repo/blob/main/docs/WIREGUARD_TROUBLESHOOTING.md"
             exit 1
           fi
