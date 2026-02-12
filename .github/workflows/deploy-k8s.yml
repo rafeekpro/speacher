@@ -22,14 +22,13 @@ on:
         description: 'Image tag to deploy'
         required: false
         default: 'latest'
-    env:
-      SERVER_WG_IP: 10.0.0.1
-      IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
 
 jobs:
   build:
     name: Build Images
     runs-on: ubuntu-latest
+    env:
+      IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
     outputs:
       image_tag: ${{ steps.meta.outputs.tags }}
 
@@ -82,6 +81,8 @@ jobs:
   setup-wireguard:
     name: Setup WireGuard
     runs-on: ubuntu-latest
+    env:
+      SERVER_WG_IP: 10.0.0.1
     outputs:
       tunnel_ready: ${{ steps.verify-tunnel.outputs.success }}
 
@@ -135,7 +136,9 @@ jobs:
     name: Deploy to Kubernetes
     needs: [build, setup-wireguard]
     runs-on: ubuntu-latest
-    environment: production
+    env:
+      SERVER_WG_IP: 10.0.0.1
+      IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
 
     steps:
       - name: Checkout code
