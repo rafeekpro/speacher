@@ -1,83 +1,3 @@
-name: Deploy to Kubernetes
-
-on:
-  push:
-    branches:
-      - main
-      - master
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Deployment environment'
-        required: true
-        default: 'production'
-        type: choice
-        options:
-          - production
-          - staging
-      image_tag:
-        description: 'Image tag to deploy'
-        required: false
-        default: 'latest'
-
-jobs:
-  build:
-    name: Build Images
-    runs-on: ubuntu-latest
-    env:
-      IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
-    outputs:
-      image_tag: ${{ steps.meta.outputs.tags }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Generate image metadata
-        id: meta
-        run: |
-          echo "tags=${{ env.IMAGE_TAG }}" >> $GITHUB_OUTPUT
-          echo "date=$(date -u +%Y%m%d%H%M%S)" >> $GITHUB_OUTPUT
-
-      - name: Build backend image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/backend.Dockerfile
-          target: production
-          push: false
-          tags: speacher-backend:${{ env.IMAGE_TAG }}
-          outputs: type=docker,dest=/tmp/backend-image.tar
-
-      - name: Build frontend image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/react.Dockerfile
-          push: false
-          tags: speacher-frontend:${{ env.IMAGE_TAG }}
-          outputs: type=docker,dest=/tmp/frontend-image.tar
-
-      - name: Upload backend image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-image
-          path: /tmp/backend-image.tar
-          retention-days: 1
-
-      - name: Upload frontend image artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: frontend-image
-          path: /tmp/frontend-image.tar
-          retention-days: 1
-
   setup-wireguard:
     name: Setup WireGuard
     runs-on: ubuntu-latest
@@ -117,7 +37,20 @@ jobs:
           echo "📊 WireGuard Status:"
           sudo wg show wg0
 
+      - name: Verify WireGuard peer added
+        id: verify-peer-added
+        run: |
+          echo "🔍 Verifying GitHub Actions peer added to server..."
+          sleep 5
+          sudo wg show wg0 | grep "peer: ${{ secrets.WG_PEER_PUBLIC_KEY }}" || echo "❌ Peer not found in server config"
+          if sudo wg show wg0 | grep -q "peer: ${{ secrets.WG_PEER_PUBLIC_KEY }}"; then
+            echo "✅ GitHub Actions peer successfully added to server"
+          else
+            echo "❌ Failed to add peer - check server config manually"
+          fi
+
       - name: Verify WireGuard handshake
+        id: verify-handshake
         run: |
           echo "⏳ Waiting for WireGuard handshake..."
           HANDSHAKE=""
@@ -139,158 +72,5 @@ jobs:
             ip link show wg0 || true
             echo "Routing table:"
             ip route get | grep wg0 || true
-            exit 1
-          fi
-
-      - name: Verify tunnel
-        id: verify-tunnel
-        run: |
-          echo "🔍 Verifying tunnel connectivity..."
-          echo "Testing ping to ${{ env.SERVER_WG_IP }}..."
-          if ping -c 3 -W 2 ${{ env.SERVER_WG_IP }}; then
-            echo "✅ Tunnel established successfully"
-            echo "success=true" >> $GITHUB_OUTPUT
-          else
-            echo "❌ Tunnel failed to establish"
-            echo "success=false" >> $GITHUB_OUTPUT
-            echo ""
-            echo "Diabling information:"
-            sudo wg show wg0
-            exit 1
-          fi
-
-  deploy:
-    name: Deploy to Kubernetes
-    needs: [build, setup-wireguard]
-    runs-on: ubuntu-latest
-    env:
-      SERVER_WG_IP: 10.204.201.1
-      IMAGE_TAG: ${{ github.event.inputs.image_tag || github.sha }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download backend image
-        uses: actions/download-artifact@v4
-        with:
-          name: backend-image
-          path: /tmp
-
-      - name: Download frontend image
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-image
-          path: /tmp
-
-      - name: Load images through tunnel
-        run: |
-          echo "📦 Loading images into containerd through WireGuard tunnel..."
-          # Combine images
-          cat /tmp/backend-image.tar /tmp/frontend-image.tar | gzip > /tmp/speacher-images.tar.gz
-
-          # Transfer images through tunnel
-          scp -o StrictHostKeyChecking=no -o ConnectTimeout=30 \
-            /tmp/speacher-images.tar.gz root@${{ env.SERVER_WG_IP }}:/tmp/
-
-          # Load images on remote
-          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30 root@${{ env.SERVER_WG_IP }} << 'EOF'
-            echo "Importing images to containerd..."
-            gunzip -c /tmp/speacher-images.tar.gz | k3s ctr images import - || \
-            gunzip -c /tmp/speacher-images.tar.gz | docker load
-            echo "Tagging images..."
-            k3s ctr images tag docker.io/library/speacher-backend:${{ env.IMAGE_TAG }} speacher-backend:${{ env.IMAGE_TAG }} 2>/dev/null || true
-            k3s ctr images tag docker.io/library/speacher-frontend:${{ env.IMAGE_TAG }} speacher-frontend:${{ env.IMAGE_TAG }} 2>/dev/null || true
-            rm -f /tmp/speacher-images.tar.gz
-            echo "✅ Images loaded successfully"
-
-      - name: Deploy Kubernetes manifests
-        run: |
-          echo "🚀 Deploying Kubernetes manifests through tunnel..."
-          # Copy manifests
-          scp -o StrictHostKeyChecking=no -r devops/k8s root@${{ env.SERVER_WG_IP }}:/tmp/speacher-k8s
-
-          # Apply manifests
-          ssh -o StrictHostKeyChecking=no root@${{ env.SERVER_WG_IP }} << 'EOF'
-            cd /tmp/speacher-k8s
-
-            echo "Applying namespace..."
-            kubectl apply -f namespace.yml
-
-            echo "Applying secrets..."
-            kubectl apply -f secrets.yml
-
-            echo "Applying backend deployment..."
-            kubectl apply -f backend.yml
-
-            echo "Applying frontend deployment..."
-            kubectl apply -f frontend.yml
-
-            echo "Updating image tags..."
-            kubectl set image deployment/backend backend=speacher-backend:${{ env.IMAGE_TAG }} -n speacher
-
-            kubectl set image deployment/frontend frontend=speacher-frontend:${{ env.IMAGE_TAG }} -n speacher
-
-            echo "Waiting for rollout..."
-            kubectl rollout status deployment/backend -n speacher --timeout=180s
-
-            kubectl rollout status deployment/frontend -n speacher --timeout=180s
-
-            echo ""
-            echo "=== Deployment Status ==="
-            kubectl get pods -n speacher
-            kubectl get svc -n speacher
-
-            rm -rf /tmp/speacher-k8s
-
-      - name: Verify deployment
-        run: |
-          echo "✅ Verifying deployment through tunnel..."
-          ssh -o StrictHostKeyChecking=no root@${{ env.SERVER_WG_IP }} << 'EOF'
-            echo "Checking pod health..."
-            kubectl get pods -n speacher -o wide
-            echo ""
-            echo "Checking services..."
-            kubectl get svc -n speacher
-            echo ""
-            echo "Health check..."
-            BACKEND_POD=$(kubectl get pods -n speacher -l app=backend -o jsonpath='{.items[0].metadata.name}')
-            if [ -n "$BACKEND_POD" ]; then
-              kubectl exec -n speacher $BACKEND_POD -- curl -s http://localhost:8000/health || echo "Health check endpoint not available"
-            fi
-          EOF
-
-  teardown-wireguard:
-    name: Teardown WireGuard Tunnel
-    needs: [setup-wireguard, deploy]
-    if: failure()
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Stop WireGuard
-        run: |
-          echo "🔻 Tearing down WireGuard tunnel..."
-          sudo wg-quick down wg0
-          echo "✅ Tunnel stopped"
-
-  notify:
-    name: Notify
-    needs: [setup-wireguard, deploy, teardown-wireguard]
-    runs-on: ubuntu-latest
-    if: always()
-
-    steps:
-      - name: Deployment status
-        run: |
-          if [ "${{ needs.deploy.result }}" == "success" ]; then
-            echo "✅ Deployment successful!"
-            echo "Backend: Available through WireGuard tunnel"
-            echo "Frontend: Available through WireGuard tunnel"
-            echo "Tunnel: 10.0.0.1 <-> 10.0.0.2"
-          else
-            echo "❌ Deployment failed!"
-            echo "Check https://github.com/rafeekpro/speacher/actions"
-            echo "Check WireGuard troubleshooting guide:"
-            echo "https://github.com/your-repo/blob/main/docs/WIREGUARD_TROUBLESHOOTING.md"
             exit 1
           fi
