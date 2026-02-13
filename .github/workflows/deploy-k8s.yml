@@ -96,7 +96,7 @@ jobs:
       - name: Setup and start WireGuard
         run: |
           echo "🔧 Configuring and starting WireGuard tunnel..."
-          cat <<EOF | sudo tee /etc/wireguard/wg0.conf
+          sudo tee /etc/wireguard/wg0.conf <<EOF
           [Interface]
           PrivateKey = ${{ secrets.WG_PRIVATE_KEY }}
           Address = 10.204.201.8/32
