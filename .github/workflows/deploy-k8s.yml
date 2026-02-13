@@ -68,9 +68,12 @@
             echo "❌ No handshake after 30 seconds"
             echo "Diabling status:"
             sudo wg show wg0
-            echo "Interface status:"
-            ip link show wg0 || true
-            echo "Routing table:"
-            ip route get | grep wg0 || true
+            echo "📋 Serwer WireGuard:"
+            sudo wg show wg0
+            echo ""
+            echo "Wygląda: Port powinien być 51820, a jest 54718"
+            echo "Konfiguracja:"
+            sudo cat /etc/wireguard/wg0.conf | head -20
+            echo ""
+            echo "Czy na pewno port serwera to 51820? (t/n)"
             exit 1
-          fi
