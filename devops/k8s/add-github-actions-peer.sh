@@ -58,7 +58,10 @@ if [ -t 0 ]; then
 fi
 
 if [ "$CONTINUE" = "yes" ]; then
-    echo "✅ Przerwano. Nie dodano peera."
+    echo ""
+    echo "✅ Dodawam peera z PublicKey: $PUBLIC_KEY"
+    echo ""
+    echo "Dodano do /etc/wireguard/wg0.conf"
     exit 0
 fi
 
