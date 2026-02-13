@@ -8,7 +8,7 @@
 set -e
 
 # Configuration
-SERVER_WG_IP="${SERVER_WG_IP:-10.0.0.1}"
+SERVER_WG_IP="${SERVER_WG_IP:-10.204.201.1}"
 WG_INTERFACE="${WG_INTERFACE:-wg0}"
 
 echo "🔧 WireGuard Tunnel Test Suite"
