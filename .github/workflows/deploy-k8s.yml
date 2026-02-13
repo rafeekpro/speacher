@@ -112,6 +112,36 @@ jobs:
           echo "Starting WireGuard interface..."
           sudo wg-quick up wg0
 
+      - name: Show WireGuard status
+        run: |
+          echo "📊 WireGuard Status:"
+          sudo wg show wg0
+
+      - name: Verify WireGuard handshake
+        run: |
+          echo "⏳ Waiting for WireGuard handshake..."
+          HANDSHAKE=""
+          for i in {1..10}; do
+            HANDSHAKE=$(sudo wg show wg0 2>/dev/null | grep "latest handshake" || echo "")
+            if [ -n "$HANDSHAKE" ]; then
+              echo "✅ Handshake successful: $HANDSHAKE"
+              break
+            fi
+            echo "Waiting... ($i/10)"
+            sleep 3
+          done
+
+          if [ -z "$HANDSHAKE" ]; then
+            echo "❌ No handshake after 30 seconds"
+            echo "Diabling status:"
+            sudo wg show wg0
+            echo "Interface status:"
+            ip link show wg0 || true
+            echo "Routing table:"
+            ip route get | grep wg0 || true
+            exit 1
+          fi
+
       - name: Verify tunnel
         id: verify-tunnel
         run: |
@@ -123,14 +153,11 @@ jobs:
           else
             echo "❌ Tunnel failed to establish"
             echo "success=false" >> $GITHUB_OUTPUT
+            echo ""
+            echo "Diabling information:"
+            sudo wg show wg0
             exit 1
           fi
-
-      - name: Show WireGuard status
-        if: always()
-        run: |
-          echo "📊 WireGuard Status:"
-          sudo wg show wg0
 
   deploy:
     name: Deploy to Kubernetes
