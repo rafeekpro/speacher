@@ -172,6 +172,7 @@ jobs:
           mkdir -p ~/.kube
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
+          export KUBECONFIG=~/.kube/config
           kubectl cluster-info
           kubectl get nodes
 
@@ -294,6 +295,7 @@ jobs:
           mkdir -p ~/.kube
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
+          export KUBECONFIG=~/.kube/config
           kubectl cluster-info
           kubectl get nodes
 
@@ -388,6 +390,7 @@ jobs:
           mkdir -p ~/.kube
           echo "${{ secrets.KUBE_CONFIG_PROD }}" | base64 -d > ~/.kube/config
           chmod 600 ~/.kube/config
+          export KUBECONFIG=~/.kube/config
           kubectl cluster-info
           kubectl get nodes
 
@@ -666,6 +669,8 @@ except Exception as e:
             echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
           fi
           chmod 600 ~/.kube/config
+          export KUBECONFIG=~/.kube/config
+          kubectl cluster-info
 
       - name: Rollback Backend
         run: |
@@ -699,7 +704,7 @@ except Exception as e:
           kubectl get pods -n "$NS"
           kubectl get deployments -n "$NS"
 
-          echo "📋 Rollback completed successfully"
+          echo  "Rollback completed successfully"
 
   # ============================================================================
   # MONITOR: Health monitoring and resource usage
@@ -722,6 +727,8 @@ except Exception as e:
             echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
           fi
           chmod 600 ~/.kube/config
+          export KUBECONFIG=~/.kube/config
+          kubectl cluster-info
 
       - name: Check Pod Health
         run: |
