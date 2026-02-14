@@ -402,64 +402,11 @@ jobs:
         # Replace localhost with cluster IP
         sed -i 's/127.0.0.1/${{ env.K3S_CLUSTER_IP }}/g' $HOME/.kube/config
         chmod 600 $HOME/.kube/config
+        export KUBECONFIG=$HOME/.kube/config
 
         echo "✅ kubectl configured"
         kubectl cluster-info
 
-    - name: Deploy MongoDB for tests
-      run: |
-        echo "🗄️ Deploying ephemeral MongoDB pod in K3s..."
-
-        # Create unique namespace for this test run
-        TEST_NAMESPACE="ci-${{ github.run_id }}"
-        kubectl create namespace $TEST_NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
-
-        # Deploy MongoDB pod
-        kubectl run mongodb-${{ github.run_id }} \
-          --image=mongo:6.0 \
-          --port=27017 \
-          --namespace=$TEST_NAMESPACE \
-          --restart=Never \
-          --env="MONGO_INITDB_ROOT_USERNAME=admin" \
-          --env="MONGO_INITDB_ROOT_PASSWORD=testpass" \
-          --labels="test-run=${{ github.run_id }}"
-
-        # Expose MongoDB service
-        kubectl expose pod mongodb-${{ github.run_id }} \
-          --port=27017 \
-          --namespace=$TEST_NAMESPACE \
-          --name=mongodb-svc-${{ github.run_id }}
-
-        # Wait for MongoDB to be ready
-        kubectl wait --for=condition=ready pod/mongodb-${{ github.run_id }} \
-          --namespace=$TEST_NAMESPACE \
-          --timeout=120s
-
-        echo "✅ MongoDB deployed in namespace: $TEST_NAMESPACE"
-
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-
-    - name: Cache dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt', '**/pyproject.toml') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements/base.txt
-        pip install -r requirements/test.txt
-
-    - name: Run unit tests
-      env:
-        MONGODB_URI: mongodb://admin:testpass@mongodb-svc-${{ github.run_id }}.ci-${{ github.run_id }}.svc.cluster.local:27017
-        S3_BUCKET_NAME: test-bucket
         AZURE_STORAGE_ACCOUNT: test-account
         GCP_PROJECT_ID: test-project
       run: |
@@ -641,6 +588,7 @@ jobs:
         mkdir -p $HOME/.kube
         echo "${{ secrets.K3S_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
         sed -i 's/127.0.0.1/${{ env.K3S_CLUSTER_IP }}/g' $HOME/.kube/config
+        export KUBECONFIG=$HOME/.kube/config
 
         # Verify Kubernetes connectivity
         if kubectl get nodes --timeout=10s; then
@@ -796,6 +744,7 @@ jobs:
         echo "${{ secrets.K3S_KUBECONFIG }}" | base64 -d > $HOME/.kube/config
         sed -i 's/127.0.0.1/${{ env.K3S_CLUSTER_IP }}/g' $HOME/.kube/config
         chmod 600 $HOME/.kube/config
+        export KUBECONFIG=$HOME/.kube/config
 
         kubectl cluster-info
 
