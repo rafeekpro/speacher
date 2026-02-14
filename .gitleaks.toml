@@ -1,0 +1,216 @@
+# Gitleaks Configuration
+# Custom rules for secret detection
+# Documentation: https://github.com/gitleaks/gitleaks/config
+
+title = "Gitleaks Custom Config"
+
+# Extend default rules
+extend-default = true
+
+# Allowlist (false positives)
+[allowlist]
+  description = "Global allowlist for common false positives"
+
+  # Exclude common development directories
+  paths = [
+    '''node_modules''',
+    '''venv''',
+    '''.venv''',
+    '''__pycache__''',
+    '''dist''',
+    '''build''',
+    '''.next''',
+    '''.nuxt''',
+    '''coverage''',
+    '''\.git''',
+  ]
+
+  # Exclude test files
+  files = [
+    '''test_.*\.py''',
+    '''.*_test\.go''',
+    '''.*_test\.js''',
+    '''.*_spec\.js''',
+    '''\.spec\.ts''',
+    '''\.test\.ts''',
+    '''__tests__/.*''',
+    '''\.mock\..*''',
+  ]
+
+  # Exclude comments
+  lines = [
+    '''\#.*password''',
+    '''\#.*api.*key''',
+    '''\//.*password''',
+    '''\//.*api.*key''',
+    '''\*.*password''',
+    '''demo.*key''',
+    '''example.*key''',
+    '''test.*token''',
+    '''localhost''',
+    '''127\.0\.0\.1''',
+  ]
+
+# Custom rules for specific secrets
+
+[[rules]]
+  description = "AWS Access Key"
+  id = "aws-access-key"
+  regex = '''(?:A3T[A-Z0-9]|AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}'''
+  secretGroup = 1
+  keywords = ["akia","agpa","aida","aroa","aipa","anpa","anva","asia"]
+
+[[rules]]
+  description = "AWS Secret Key"
+  id = "aws-secret-key"
+  regex = '''(?i)aws.{0,20}['\"]?[0-9a-zA-Z\/+]{40}['\"]?'''
+  keywords = ["aws","secret","key"]
+
+[[rules]]
+  description = "GitHub Personal Access Token"
+  id = "github-pat"
+  regex = '''ghp_[a-zA-Z0-9]{36}'''
+  keywords = ["ghp_"]
+
+[[rules]]
+  description = "GitHub OAuth App Token"
+  id = "github-oauth"
+  regex = '''(gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36}'''
+  keywords = ["gho_","ghu_","ghs_","ghr_"]
+
+[[rules]]
+  description = "Stripe API Key"
+  id = "stripe-api-key"
+  regex = '''(?i)stripe.{0,20}['\"]?[sk|pk]_(live|test)_[0-9a-zA-Z]{24,}'''
+  keywords = ["stripe","api","key"]
+
+[[rules]]
+  description = "Slack Token"
+  id = "slack-token"
+  regex = '''xox[baprs]-[0-9]{12}-[0-9]{12}-[0-9]{12}-[a-z0-9]{32}'''
+  keywords = ["xoxb","xoxp","xoxr","xoxs"]
+
+[[rules]]
+  description = "Slack Webhook"
+  id = "slack-webhook"
+  regex = '''https://hooks\.slack\.com/services/T[A-Z0-9]{8}/B[A-Z0-9]{8}/[a-zA-Z0-9]{24}'''
+  keywords = ["hooks.slack.com"]
+
+[[rules]]
+  description = "Google Cloud API Key"
+  id = "google-api-key"
+  regex = '''AIza[0-9A-Za-z\\-_]{35}'''
+  keywords = ["aiza"]
+
+[[rules]]
+  description = "Google Cloud OAuth"
+  id = "google-oauth"
+  regex = '''[0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com'''
+  keywords = ["googleusercontent","apps.googleusercontent.com"]
+
+[[rules]]
+  description = "Azure Storage Account Key"
+  id = "azure-storage-key"
+  regex = '''AccountKey=[a-zA-Z0-9+/]{88}=='''
+  keywords = ["accountkey","azure","storage"]
+
+[[rules]]
+  description = "Azure Client Secret"
+  id = "azure-client-secret"
+  regex = '''(?i)azure.{0,20}['\"]?[0-9a-zA-Z~]{40,}['\"]?'''
+  keywords = ["azure","secret","client"]
+
+[[rules]]
+  description = "Mailgun API Key"
+  id = "mailgun-key"
+  regex = '''key-[0-9a-zA-Z]{32}'''
+  keywords = ["mailgun","key-"]
+
+[[rules]]
+  description = "SendGrid API Key"
+  id = "sendgrid-key"
+  regex = '''SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43}'''
+  keywords = ["sg."]
+
+[[rules]]
+  description = "Twilio API Key"
+  id = "twilio-key"
+  regex = '''AC[0-9a-f]{32}'''
+  keywords = ["ac"]
+
+[[rules]]
+  description = "PostgreSQL Connection String"
+  id = "postgres-connection"
+  regex = '''postgres://[a-zA-Z0-9:_+.-]+@[a-zA-Z0-9._-]+:[0-9]+'''
+  keywords = ["postgres://","postgresql://"]
+
+[[rules]]
+  description = "MySQL Connection String"
+  id = "mysql-connection"
+  regex = '''mysql://[a-zA-Z0-9:_+.-]+@[a-zA-Z0-9._-]+:[0-9]+'''
+  keywords = ["mysql://"]
+
+[[rules]]
+  description = "MongoDB Connection String"
+  id = "mongodb-connection"
+  regex = '''mongodb://[a-zA-Z0-9:_+.-]+@[a-zA-Z0-9._-]+:[0-9]+'''
+  keywords = ["mongodb://"]
+
+[[rules]]
+  description = "Redis Connection String"
+  id = "redis-connection"
+  regex = '''redis://[a-zA-Z0-9:_+.-]+@[a-zA-Z0-9._-]+:[0-9]+'''
+  keywords = ["redis://"]
+
+[[rules]]
+  description = "Private Key"
+  id = "private-key"
+  regex = '''-----BEGIN [A-Z]+ PRIVATE KEY-----'''
+  keywords = ["begin","private","key"]
+
+[[rules]]
+  description = "SSH Private Key"
+  id = "ssh-private-key"
+  regex = '''-----BEGIN RSA PRIVATE KEY-----'''
+  keywords = ["begin","rsa","private","key"]
+
+[[rules]]
+  description = "PEM Certificate"
+  id = "pem-cert"
+  regex = '''-----BEGIN CERTIFICATE-----'''
+  keywords = ["begin","certificate"]
+
+[[rules]]
+  description = "API Token Generic"
+  id = "api-token-generic"
+  regex = '''(?i)(api[_-]?key|apikey|secret[_-]?key|auth[_-]?token|access[_-]?token)['\"]?\s*[:=]\s*['\"]?[0-9a-zA-Z]{20,}'''
+  keywords = ["api","key","secret","token","auth"]
+
+[[rules]]
+  description = "Base64 Encoded Secret"
+  id = "base64-secret"
+  regex = '''['\"]?[0-9a-zA-Z+/]{40,}={0,2}['\"]?'''
+  entropy = 4.5
+  keywords = ["key","secret","token","password"]
+  # High entropy threshold to reduce false positives
+
+[[rules]]
+  description = "Email Address (potential PII)"
+  id = "email-address"
+  regex = '''[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'''
+  # Disabled by default - enable if needed
+  # keywords = ["@",".com",".org",".net"]
+
+# Custom entropy rules
+[[rules]]
+  description = "High Entropy String (Potential Secret)"
+  id = "high-entropy"
+  regex = '''['"]?[a-zA-Z0-9+/]{40,}={0,2}['"]?'''
+  entropy = 5.0
+  # Very high entropy threshold
+
+# Project-specific exceptions (add as needed)
+# [[rules.allowlist]]
+#   description = "Test fixtures with fake secrets"
+#   files = ['''tests/fixtures/.*\.json''']
+#   regex = '''(?:api_key|secret).*['"]?[a-zA-Z0-9]{20,}'''

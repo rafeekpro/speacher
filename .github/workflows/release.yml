@@ -1,0 +1,494 @@
+name: Create Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.2.3)'
+        required: true
+        type: string
+      draft:
+        description: 'Create as draft'
+        required: false
+        type: boolean
+        default: false
+      pre_release:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  deployments: write
+  packages: write
+  id-token: write
+
+jobs:
+  # Extract and validate version
+  extract-version:
+    name: Extract & Validate Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      version_no_v: ${{ steps.version.outputs.version_no_v }}
+      is_semantic: ${{ steps.validate.outputs.is_semantic }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract Version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_no_v=${VERSION#v}" >> $GITHUB_OUTPUT
+          echo "📌 Version: $VERSION"
+
+      - name: Validate Semantic Versioning
+        id: validate
+        run: |
+          VERSION="${{ steps.version.outputs.version_no_v }}"
+
+          if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "❌ Invalid semantic version: $VERSION"
+            echo "Expected format: v1.2.3 or v1.2.3-alpha.1"
+            exit 1
+          fi
+
+          echo "✅ Valid semantic version: $VERSION"
+          echo "is_semantic=true" >> $GITHUB_OUTPUT
+
+      - name: Check for Duplicate Release
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          if gh release view $VERSION 2>/dev/null; then
+            echo "❌ Release $VERSION already exists"
+            echo "To recreate, delete the existing release first"
+            exit 1
+          fi
+
+          echo "✅ Release $VERSION does not exist yet"
+
+  # Generate changelog from commits
+  generate-changelog:
+    name: Generate Changelog
+    needs: extract-version
+    runs-on: ubuntu-latest
+    outputs:
+      changelog_file: ${{ steps.changelog.outputs.file }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get Previous Tag
+        id: prev_tag
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          echo "prev_tag=$PREV_TAG" >> $GITHUB_OUTPUT
+          echo "📅 Previous tag: $PREV_TAG"
+
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          VERSION="${{ needs.extract-version.outputs.version }}"
+          PREV_TAG="${{ steps.prev_tag.outputs.prev_tag }}"
+
+          echo "## What's Changed in $VERSION" > changelog.md
+          echo "" >> changelog.md
+          echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/$PREV_TAG...$VERSION" >> changelog.md
+          echo "" >> changelog.md
+
+          # Categorize commits
+          echo "### 🎉 Added" >> changelog.md
+          git log $PREV_TAG..HEAD --grep='^feat' --oneline | sed 's/^/  - /' | head -20 >> changelog.md || echo "  - No new features" >> changelog.md
+
+          echo "" >> changelog.md
+          echo "### 🔧 Changed" >> changelog.md
+          git log $PREV_TAG..HEAD --grep='^chore\|^refactor' --oneline | sed 's/^/  - /' | head -20 >> changelog.md || echo "  - No changes" >> changelog.md
+
+          echo "" >> changelog.md
+          echo "### 🐛 Fixed" >> changelog.md
+          git log $PREV_TAG..HEAD --grep='^fix' --oneline | sed 's/^/  - /' | head -20 >> changelog.md || echo "  - No bug fixes" >> changelog.md
+
+          echo "" >> changelog.md
+          echo "### 🗑️ Removed" >> changelog.md
+          git log $PREV_TAG..HEAD --grep='^remove' --oneline | sed 's/^/  - /' | head -20 >> changelog.md || echo "  - No removals" >> changelog.md
+
+          # Get commit authors
+          echo "" >> changelog.md
+          echo "### 👥 Contributors" >> changelog.md
+          git log $PREV_TAG..HEAD --format='  - @%an' | sort -u >> changelog.md
+
+          # Show full commit list
+          echo "" >> changelog.md
+          echo "### 📝 Full Commit History" >> changelog.md
+          git log $PREV_TAG..HEAD --oneline >> changelog.md
+
+          cat changelog.md
+          echo "file=changelog.md" >> $GITHUB_OUTPUT
+
+      - name: Upload Changelog
+        uses: actions/upload-artifact@v4
+        with:
+          name: changelog
+          path: changelog.md
+
+  # Build Python packages
+  build-python:
+    name: Build Python Packages
+    needs: [extract-version, generate-changelog]
+    runs-on: ubuntu-latest
+    if: hashFiles('pyproject.toml') != ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Build Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build Package
+        run: |
+          python -m build
+
+      - name: Check Package
+        run: |
+          twine check dist/*
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-packages
+          path: dist/
+
+  # Build Node packages
+  build-node:
+    name: Build Node Packages
+    needs: [extract-version, generate-changelog]
+    runs-on: ubuntu-latest
+    if: hashFiles('package.json') != ''
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Package
+        run: |
+          VERSION="${{ needs.extract-version.outputs.version_no_v }}"
+          npm version $VERSION --no-git-tag-version
+          npm run build || true
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-packages
+          path: |
+            package.json
+            package-lock.json
+            build/
+            dist/
+
+  # Publish to PyPI
+  publish-python:
+    name: Publish to PyPI
+    needs: [extract-version, build-python]
+    runs-on: ubuntu-latest
+    if: hashFiles('pyproject.toml') != ''
+    environment:
+      name: pypi
+      url: https://pypi.org/p/speacher
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-packages
+          path: dist/
+
+      - name: Publish to Test PyPI
+        if: github.ref != 'refs/heads/main'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          TWINE_REPOSITORY_URL: https://test.pypi.org/legacy/
+        run: |
+          twine upload --skip-existing dist/*
+
+      - name: Publish to Production PyPI
+        if: github.ref == 'refs/heads/main'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          twine upload --skip-existing dist/*
+
+      - name: Verify Package
+        run: |
+          VERSION="${{ needs.extract-version.outputs.version_no_v }}"
+          pip install speacher==$VERSION
+          python -c "import speacher; print(speacher.__version__)"
+
+  # Publish to npm
+  publish-node:
+    name: Publish to npm
+    needs: [extract-version, build-node]
+    runs-on: ubuntu-latest
+    if: hashFiles('package.json') != ''
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/speacher
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: node-packages
+
+      - name: Publish to npm
+        run: |
+          npm config set //registry.npmjs.org/:_authToken ${NPM_TOKEN}
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Verify Package
+        run: |
+          VERSION="${{ needs.extract-version.outputs.version_no_v }}"
+          npm info speacher@$VERSION
+
+  # Build and tag Docker images
+  build-docker:
+    name: Build & Tag Docker Images
+    needs: [extract-version, generate-changelog]
+    runs-on: ubuntu-latest
+    if: hashFiles('Dockerfile') != ''
+    strategy:
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ secrets.DOCKER_USERNAME }}/speacher
+            ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and Push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image Digest
+        run: echo "Digest ${{ steps.meta.outputs.digest }}"
+
+  # Create GitHub Release
+  create-release:
+    name: Create GitHub Release
+    needs:
+      - extract-version
+      - generate-changelog
+      - build-python
+      - build-node
+      - build-docker
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Changelog
+        uses: actions/download-artifact@v4
+        with:
+          name: changelog
+
+      - name: Download Python Artifacts
+        if: hashFiles('pyproject.toml') != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: python-packages
+
+      - name: Download Node Artifacts
+        if: hashFiles('package.json') != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: node-packages
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.extract-version.outputs.version }}
+          DRAFT: ${{ github.event.inputs.draft || 'false' }}
+          PRE_RELEASE: ${{ github.event.inputs.pre_release || 'false' }}
+        run: |
+          RELEASE_ARGS=()
+
+          if [ "$DRAFT" = "true" ]; then
+            RELEASE_ARGS+=(--draft)
+          fi
+
+          if [ "$PRE_RELEASE" = "true" ]; then
+            RELEASE_ARGS+=(--prerelease)
+          fi
+
+          gh release create "$VERSION" \
+            --title "Release $VERSION" \
+            --notes-file changelog.md \
+            "${RELEASE_ARGS[@]}"
+
+          echo "✅ Release $VERSION created successfully"
+
+      - name: Attach Artifacts
+        if: hashFiles('pyproject.toml') != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.extract-version.outputs.version }}
+        run: |
+          gh release upload "$VERSION" dist/* --clobber
+
+      - name: Update Version Badges
+        if: github.ref == 'refs/heads/main'
+        run: |
+          VERSION="${{ needs.extract-version.outputs.version_no_v }}"
+          echo "📌 Version: $VERSION"
+
+          # Update README badges (if they exist)
+          if [ -f README.md ]; then
+            sed -i "s/v[0-9]\+\.[0-9]\+\.[0-9]\+/$VERSION/g" README.md || true
+            git config user.name "GitHub Actions"
+            git config user.email "actions@github.com"
+            git add README.md
+            git commit -m "docs: Update version badges to $VERSION" || true
+            git push || true
+          fi
+
+  # Announce release
+  announce:
+    name: Announce Release
+    needs: create-release
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Changelog
+        uses: actions/download-artifact@v4
+        with:
+          name: changelog
+
+      - name: Slack Notification
+        if: vars.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ vars.SLACK_WEBHOOK_URL }}
+          VERSION: ${{ needs.create-release.outputs.version }}
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data "{\"text\": \"🚀 New Release: $VERSION\n\n$(cat changelog.md)\"}" \
+            $SLACK_WEBHOOK_URL
+
+      - name: Create Release Announcement
+        run: |
+          VERSION="${{ needs.extract-version.outputs.version }}"
+          cat > announcement.md << EOF
+          # 🚀 Speecher $VERSION Released
+
+          We're excited to announce the release of Speecher $VERSION!
+
+          $(cat changelog.md)
+
+          ## Installation
+
+          ### Python
+          \`\`\`bash
+          pip install speacher==$VERSION
+          \`\`\`
+
+          ### Docker
+          \`\`\`bash
+          docker pull ghcr.io/${{ github.repository }}:$VERSION
+          \`\`\`
+
+          ## Documentation
+
+          Full documentation: https://github.com/${{ github.repository }}
+
+          ## Links
+
+          - GitHub: https://github.com/${{ github.repository }}
+          - PyPI: https://pypi.org/p/speacher
+          - Docker Hub: https://hub.docker.com/r/${{ secrets.DOCKER_USERNAME }}/speacher
+          EOF
+
+          cat announcement.md
+
+      - name: Upload Announcement
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-announcement
+          path: announcement.md

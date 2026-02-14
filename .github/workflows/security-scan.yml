@@ -1,0 +1,463 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ========================================
+  # SAST (Static Application Security Testing)
+  # ========================================
+  sast:
+    name: SAST - Semgrep
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Semgrep scan
+        uses: returntocorp/semgrep-action@v1
+        with:
+          config: >-
+            --config auto
+            --severity ERROR
+            --severity WARNING
+        continue-on-error: false
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: semgrep.sarif
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-results
+          path: |
+            semgrep.sarif
+            semgrep.json
+
+  # ========================================
+  # Dependency Scanning
+  # ========================================
+  dependency-scan:
+    name: Dependency Scan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        scanner: [snyk, npm-audit]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python (for Snyk)
+        if: matrix.scanner == 'snyk'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Node.js (for npm audit)
+        if: matrix.scanner == 'npm-audit'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Snyk scan
+        if: matrix.scanner == 'snyk'
+        uses: snyk/actions/python@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high --sarif-file-output=snyk.sarif
+
+      - name: npm audit
+        if: matrix.scanner == 'npm-audit'
+        run: |
+          if [ -f "package.json" ]; then
+            npm audit --audit-level=high --json > npm-audit.json || true
+            npm audit --audit-level=high
+          else
+            echo "No package.json found, skipping npm audit"
+            echo "{}" > npm-audit.json
+          fi
+
+      - name: Upload Snyk SARIF
+        if: matrix.scanner == 'snyk' && always()
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: snyk.sarif
+
+      - name: Upload dependency scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-scan-${{ matrix.scanner }}
+          path: |
+            snyk.sarif
+            npm-audit.json
+
+  # ========================================
+  # Container Scanning
+  # ========================================
+  container-scan:
+    name: Container Scan - Trivy
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build test image
+        run: |
+          if [ -f "Dockerfile" ]; then
+            docker build -t test-image:${{ github.sha }} .
+          elif [ -f "Dockerfile.dev" ]; then
+            docker build -f Dockerfile.dev -t test-image:${{ github.sha }} .
+          else
+            echo "No Dockerfile found, skipping container scan"
+            exit 0
+          fi
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: test-image:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          scan-type: 'full'
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'json'
+          output: 'trivy-fs.json'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Upload container scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-scan-results
+          path: |
+            trivy-results.sarif
+            trivy-fs.json
+
+      - name: Check for critical vulnerabilities
+        if: always()
+        run: |
+          if [ -f "trivy-results.sarif" ]; then
+            CRITICAL_COUNT=$(jq '.runs[0].results | length' trivy-results.sarif)
+            if [ "$CRITICAL_COUNT" -gt 0 ]; then
+              echo "❌ CRITICAL: Found $CRITICAL_COUNT critical vulnerabilities"
+              exit 1
+            fi
+          fi
+
+  # ========================================
+  # Secret Detection
+  # ========================================
+  secret-scan:
+    name: Secret Scan - Gitleaks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gitleaks scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      - name: Upload secret scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: secret-scan-results
+          path: |
+            gitleaks-report.json
+            gitleaks-report.sarif
+
+      - name: Check for secrets
+        if: always()
+        run: |
+          if [ -f "gitleaks-report.json" ]; then
+            SECRET_COUNT=$(jq '. | length' gitleaks-report.json)
+            if [ "$SECRET_COUNT" -gt 0 ]; then
+              echo "❌ CRITICAL: Found $SECRET_COUNT potential secrets"
+              jq -r '.[] | "\(.file):\(.line) - \(.description)"' gitleaks-report.json
+              exit 1
+            else
+              echo "✅ No secrets detected"
+            fi
+          fi
+
+  # ========================================
+  # Infrastructure as Code Scanning
+  # ========================================
+  iac-scan:
+    name: IaC Scan
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Terraform security scan (tfsec)
+        if: hashFiles('**/*.tf') != ''
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          additional_args: '--out-format json --force-all-dirs'
+        continue-on-error: true
+
+      - name: Kubernetes manifest scan (kube-score)
+        if: hashFiles('**/*.yaml', '**/*.yml') != ''
+        run: |
+          if [ -d "k8s" ] || [ -d "kubernetes" ] || [ -d "manifests" ]; then
+            docker run --rm -v "$PWD:/workdir zegl/kube-score:latest --output-format json --ignore-container-security-context --ignore-service-type /workdir/k8s/*.yaml > kube-score.json 2>&1 || true
+            docker run --rm -v "$PWD:/workdir zegl/kube-score:latest --output-format json --ignore-container-security-context --ignore-service-type /workdir/k8s/*.yaml || true
+          else
+            echo "No Kubernetes manifests found"
+            echo "{}" > kube-score.json
+          fi
+        continue-on-error: true
+
+      - name: Upload IaC scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iac-scan-results
+          path: |
+            tfsec.json
+            kube-score.json
+
+      - name: Check IaC issues
+        if: always()
+        run: |
+          if [ -f "tfsec.json" ]; then
+            CRITICAL_COUNT=$(jq '.results | map(select(.severity == "CRITICAL")) | length' tfsec.json || echo "0")
+            if [ "$CRITICAL_COUNT" -gt 0 ]; then
+              echo "❌ CRITICAL: Found $CRITICAL_COUNT critical IaC issues"
+              exit 1
+            fi
+          fi
+
+  # ========================================
+  # Aggregate & Report
+  # ========================================
+  report:
+    name: Security Report
+    runs-on: ubuntu-latest
+    needs: [sast, dependency-scan, container-scan, secret-scan, iac-scan]
+    if: always()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: results
+
+      - name: Generate security summary
+        id: security-summary
+        run: |
+          echo "## 🔒 Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Workflow:** ${{ github.workflow }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # SAST Results
+          echo "### 📋 SAST (Semgrep)" >> $GITHUB_STEP_SUMMARY
+          if [ -f "results/sast-results/semgrep.sarif" ]; then
+            SAST_COUNT=$(jq '.runs[0].results | length' results/sast-results/semgrep.sarif || echo "0")
+            if [ "$SAST_COUNT" -eq 0 ]; then
+              echo "✅ No issues found" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Found $SAST_COUNT issues" >> $GITHUB_STEP_SUMMARY
+              jq -r '.runs[0].results[] | "- \`\`\`src\(.location.primaryFilePath.path)\`\`\`:\(.location.primaryFilePath.line) - \(.message.text)"' results/sast-results/semgrep.sarif >> $GITHUB_STEP_SUMMARY || true
+            fi
+          else
+            echo "⚠️ No SAST results available" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Dependency Scan Results
+          echo "### 📦 Dependency Scan" >> $GITHUB_STEP_SUMMARY
+          if [ -f "results/dependency-scan-snyk/snyk.sarif" ]; then
+            SNYK_COUNT=$(jq '.runs[0].results | length' results/dependency-scan-snyk/snyk.sarif || echo "0")
+            echo "- **Snyk:** $SNYK_COUNT vulnerabilities" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Snyk:** No results" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f "results/dependency-scan-npm-audit/npm-audit.json" ]; then
+            NPM_AUDIT_COUNT=$(jq '.vulnerabilities | length' results/dependency-scan-npm-audit/npm-audit.json || echo "0")
+            echo "- **npm audit:** $NPM_AUDIT_COUNT vulnerabilities" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **npm audit:** No results" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Container Scan Results
+          echo "### 🐳 Container Scan (Trivy)" >> $GITHUB_STEP_SUMMARY
+          if [ -f "results/container-scan-results/trivy-results.sarif" ]; then
+            CONTAINER_COUNT=$(jq '.runs[0].results | length' results/container-scan-results/trivy-results.sarif || echo "0")
+            if [ "$CONTAINER_COUNT" -eq 0 ]; then
+              echo "✅ No vulnerabilities found" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Found $CONTAINER_COUNT vulnerabilities" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "⚠️ No container scan results" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Secret Scan Results
+          echo "### 🔐 Secret Scan (Gitleaks)" >> $GITHUB_STEP_SUMMARY
+          if [ -f "results/secret-scan-results/gitleaks-report.json" ]; then
+            SECRET_COUNT=$(jq '. | length' results/secret-scan-results/gitleaks-report.json || echo "0")
+            if [ "$SECRET_COUNT" -eq 0 ]; then
+              echo "✅ No secrets found" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Found $SECRET_COUNT potential secrets" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "⚠️ No secret scan results" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # IaC Scan Results
+          echo "### 🏗️ Infrastructure as Code" >> $GITHUB_STEP_SUMMARY
+          if [ -f "results/iac-scan-results/tfsec.json" ]; then
+            IAC_COUNT=$(jq '.results | length' results/iac-scan-results/tfsec.json || echo "0")
+            if [ "$IAC_COUNT" -eq 0 ]; then
+              echo "✅ No IaC issues found" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Found $IAC_COUNT IaC issues" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "⚠️ No IaC scan results" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Overall Status
+          echo "## 📊 Overall Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check for critical failures
+          if [ "${{ needs.sast.result }}" == "failure" ] || \
+             [ "${{ needs.secret-scan.result }}" == "failure" ] || \
+             [ "${{ needs.container-scan.result }}" == "failure" ]; then
+            echo "❌ **CRITICAL SECURITY ISSUES FOUND**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Action required: Please review the findings above and remediate critical issues." >> $GITHUB_STEP_SUMMARY
+            exit 1
+          elif [ "${{ needs.dependency-scan.result }}" == "failure" ]; then
+            echo "⚠️ **Vulnerabilities found in dependencies**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Action required: Update dependencies to address known vulnerabilities." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ **All security checks passed**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+
+            let comment = '## 🔒 Security Scan Results\n\n';
+            comment += `**Commit:** ${{ github.sha }}\n`;
+            comment += `**Branch:** ${{ github.head_ref }}\n\n`;
+
+            // Add results from summary
+            try {
+              const summary = fs.readFileSync('process.env.GITHUB_STEP_SUMMARY', 'utf8');
+              comment += summary;
+            } catch (error) {
+              comment += 'Unable to generate detailed summary.\n';
+            }
+
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
+              comment.body.includes('## 🔒 Security Scan Results')
+            );
+
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: |
+            results/sast-results/semgrep.sarif
+            results/dependency-scan-snyk/snyk.sarif
+            results/container-scan-results/trivy-results.sarif
+        continue-on-error: true
+
+      - name: Fail on critical issues
+        if: |
+          needs.sast.result == 'failure' ||
+          needs.secret-scan.result == 'failure' ||
+          needs.container-scan.result == 'failure'
+        run: |
+          echo "❌ Critical security issues detected. Please review and fix before merging."
+          exit 1

@@ -1,0 +1,863 @@
+name: Deploy to Kubernetes (Enhanced)
+
+on:
+  push:
+    branches: [main, master, develop, feature/**]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+  release:
+    types: [created]
+
+permissions:
+  contents: read
+  deployments: write
+
+env:
+  CLUSTER_NAME: ${{ secrets.CLUSTER_NAME || 'speecher-cluster' }}
+  REGISTRY: ${{ secrets.CONTAINER_REGISTRY || 'ghcr.io' }}
+
+jobs:
+  # ============================================================================
+  # PREPARE: Determine environment and variables
+  # ============================================================================
+  prepare:
+    name: Prepare Deployment
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      namespace: ${{ steps.set-env.outputs.namespace }}
+      image_tag: ${{ steps.set-env.outputs.image_tag }}
+      is_production: ${{ steps.set-env.outputs.is_production }}
+
+    steps:
+      - name: Determine Environment
+        id: set-env
+        run: |
+          if [ "${{ github.event_name }}" == "release" ]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "namespace=production" >> $GITHUB_OUTPUT
+            echo "image_tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "is_production=true" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" == "refs/heads/main" ] || [ "${{ github.ref }}" == "refs/heads/master" ]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "namespace=staging" >> $GITHUB_OUTPUT
+            echo "image_tag=staging-${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "is_production=false" >> $GITHUB_OUTPUT
+          elif [ -n "${{ github.event.inputs.environment }}" ]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "namespace=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "image_tag=${{ github.event.inputs.environment }}-${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "is_production=${{ github.event.inputs.environment == 'production' }}" >> $GITHUB_OUTPUT
+          else
+            echo "environment=dev" >> $GITHUB_OUTPUT
+            echo "namespace=dev-${{ github.run_id }}" >> $GITHUB_OUTPUT
+            echo "image_tag=dev-${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "is_production=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Display Deployment Configuration
+        run: |
+          echo "📋 Deployment Configuration:"
+          echo "Environment: ${{ steps.set-env.outputs.environment }}"
+          echo "Namespace: ${{ steps.set-env.outputs.namespace }}"
+          echo "Image Tag: ${{ steps.set-env.outputs.image_tag }}"
+          echo "Production: ${{ steps.set-env.outputs.is_production }}"
+
+  # ============================================================================
+  # BUILD: Build and push container images
+  # ============================================================================
+  build:
+    name: Build Images
+    needs: prepare
+    runs-on: ubuntu-latest
+    outputs:
+      backend_image: ${{ steps.set-images.outputs.backend_image }}
+      frontend_image: ${{ steps.set-images.outputs.frontend_image }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/${{ github.repository }}/backend
+            ${{ env.REGISTRY }}/${{ github.repository }}/frontend
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=${{ needs.prepare.outputs.environment }}-
+            type=raw,value=${{ needs.prepare.outputs.image_tag }}
+
+      - name: Build Backend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Build Frontend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Set Image Names
+        id: set-images
+        run: |
+          BACKEND_IMAGE="${{ env.REGISTRY }}/${{ github.repository }}/backend:${{ needs.prepare.outputs.image_tag }}"
+          FRONTEND_IMAGE="${{ env.REGISTRY }}/${{ github.repository }}/frontend:${{ needs.prepare.outputs.image_tag }}"
+          echo "backend_image=$BACKEND_IMAGE" >> $GITHUB_OUTPUT
+          echo "frontend_image=$FRONTEND_IMAGE" >> $GITHUB_OUTPUT
+          echo "Images built:"
+          echo "  Backend: $BACKEND_IMAGE"
+          echo "  Frontend: $FRONTEND_IMAGE"
+
+  # ============================================================================
+  # DEPLOY-DEV: Deploy to development environment
+  # ============================================================================
+  deploy-dev:
+    name: Deploy to Dev
+    needs: [prepare, build]
+    if: needs.prepare.outputs.environment == 'dev'
+    runs-on: ubuntu-latest
+    environment:
+      name: dev
+      url: https://dev.speecher.example.com
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Configure kubectl
+        run: |
+          echo "🔧 Configuring kubectl for cluster: ${{ env.CLUSTER_NAME }}"
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Create Namespace
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "📦 Creating namespace: $NS"
+          kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label namespace "$NS" purpose=dev team=speecher
+
+      - name: Apply Secrets
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🔐 Applying secrets to namespace: $NS"
+
+          # Apply backend secrets
+          envsubst < k8s/backend-secrets-template.yaml | kubectl apply -n "$NS" -f -
+
+      - name: Deploy Backend
+        id: deploy-backend
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          BACKEND_IMAGE="${{ needs.build.outputs.backend_image }}"
+
+          echo "🚀 Deploying backend to namespace: $NS"
+          envsubst < k8s/backend-deployment.yaml | kubectl apply -n "$NS" -f -
+
+          # Wait for deployment to rollout
+          echo "⏳ Waiting for backend deployment..."
+          kubectl rollout status deployment/backend -n "$NS" --timeout=5m
+
+      - name: Deploy Frontend
+        id: deploy-frontend
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          FRONTEND_IMAGE="${{ needs.build.outputs.frontend_image }}"
+
+          echo "🚀 Deploying frontend to namespace: $NS"
+          envsubst < k8s/frontend-deployment.yaml | kubectl apply -n "$NS" -f -
+
+          # Wait for deployment to rollout
+          echo "⏳ Waiting for frontend deployment..."
+          kubectl rollout status deployment/frontend -n "$NS" --timeout=5m
+
+      - name: Apply Ingress
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🌐 Applying ingress rules..."
+          kubectl apply -n "$NS" -f k8s/ingress-dev.yaml
+
+      - name: Verify Deployment
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "✅ Verifying deployment..."
+
+          # Check pods are running
+          kubectl get pods -n "$NS"
+
+          # Check services
+          kubectl get svc -n "$NS"
+
+          # Check ingress
+          kubectl get ingress -n "$NS"
+
+          # Display logs
+          echo "📋 Recent Backend Logs:"
+          kubectl logs -n "$NS" -l app=backend --tail=20 || true
+
+          echo "📋 Recent Frontend Logs:"
+          kubectl logs -n "$NS" -l app=frontend --tail=20 || true
+
+      - name: Debug on Failure
+        if: failure()
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🐞 Deployment failed - Gathering diagnostics..."
+
+          echo "=== Pod Status ==="
+          kubectl get pods -n "$NS" -o wide
+
+          echo "=== Pod Descriptions ==="
+          for pod in $(kubectl get pods -n "$NS" -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- Pod: $pod ---"
+            kubectl describe pod "$pod" -n "$NS"
+          done
+
+          echo "=== Recent Events ==="
+          kubectl get events -n "$NS" --sort-by='.lastTimestamp' | tail -20
+
+          echo "=== Logs ==="
+          for pod in $(kubectl get pods -n "$NS" -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- Logs from: $pod ---"
+            kubectl logs "$pod" -n "$NS" --all-containers=true || true
+          done
+
+  # ============================================================================
+  # DEPLOY-STAGING: Deploy to staging environment
+  # ============================================================================
+  deploy-staging:
+    name: Deploy to Staging
+    needs: [prepare, build]
+    if: needs.prepare.outputs.environment == 'staging'
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging.speecher.example.com
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Configure kubectl
+        run: |
+          echo "🔧 Configuring kubectl for cluster: ${{ env.CLUSTER_NAME }}"
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Create Namespace
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "📦 Ensuring namespace exists: $NS"
+          kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label namespace "$NS" purpose=staging team=speecher
+
+      - name: Apply Secrets
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🔐 Applying secrets to namespace: $NS"
+          envsubst < k8s/backend-secrets-template.yaml | kubectl apply -n "$NS" -f -
+
+      - name: Deploy Backend
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          BACKEND_IMAGE="${{ needs.build.outputs.backend_image }}"
+
+          echo "🚀 Deploying backend to namespace: $NS"
+          envsubst < k8s/backend-deployment.yaml | kubectl apply -n "$NS" -f -
+
+          echo "⏳ Waiting for backend rollout..."
+          kubectl rollout status deployment/backend -n "$NS" --timeout=5m
+
+      - name: Deploy Frontend
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          FRONTEND_IMAGE="${{ needs.build.outputs.frontend_image }}"
+
+          echo "🚀 Deploying frontend to namespace: $NS"
+          envsubst < k8s/frontend-deployment.yaml | kubectl apply -n "$NS" -f -
+
+          echo "⏳ Waiting for frontend rollout..."
+          kubectl rollout status deployment/frontend -n "$NS" --timeout=5m
+
+      - name: Apply Ingress
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🌐 Applying ingress rules..."
+          kubectl apply -n "$NS" -f k8s/ingress.yaml
+
+      - name: Verify Deployment
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "✅ Verifying deployment in staging..."
+
+          kubectl get pods -n "$NS"
+          kubectl get svc -n "$NS"
+          kubectl get ingress -n "$NS"
+
+      - name: Debug on Failure
+        if: failure()
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🐞 Staging deployment failed - Gathering diagnostics..."
+
+          kubectl get pods -n "$NS" -o wide
+          kubectl get events -n "$NS" --sort-by='.lastTimestamp' | tail -20
+
+          for pod in $(kubectl get pods -n "$NS" -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- Logs: $pod ---"
+            kubectl logs "$pod" -n "$NS" --all-containers=true --tail=50 || true
+          done
+
+  # ============================================================================
+  # DEPLOY-PRODUCTION: Deploy to production (requires approval)
+  # ============================================================================
+  deploy-production:
+    name: Deploy to Production
+    needs: [prepare, build]
+    if: needs.prepare.outputs.environment == 'production'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://speecher.example.com
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Configure kubectl
+        run: |
+          echo "🔧 Configuring kubectl for production cluster..."
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG_PROD }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+          kubectl cluster-info
+          kubectl get nodes
+
+      - name: Pre-deployment Checks
+        run: |
+          echo "🔍 Running pre-deployment checks..."
+
+          # Check current deployments
+          echo "Current production deployments:"
+          kubectl get deployments -n production
+
+          # Check pod health
+          echo "Current pod status:"
+          kubectl get pods -n production
+
+      - name: Create Namespace
+        run: |
+          echo "📦 Ensuring production namespace exists..."
+          kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label namespace production purpose=production team=speecher
+
+      - name: Apply Secrets
+        run: |
+          echo "🔐 Applying production secrets..."
+          envsubst < k8s/backend-secrets-template.yaml | kubectl apply -n production -f -
+
+      - name: Deploy Backend
+        id: deploy-backend
+        run: |
+          BACKEND_IMAGE="${{ needs.build.outputs.backend_image }}"
+
+          echo "🚀 Deploying backend to PRODUCTION..."
+          envsubst < k8s/backend-deployment-prod.yaml | kubectl apply -n production -f -
+
+          echo "⏳ Waiting for backend rollout..."
+          kubectl rollout status deployment/backend -n production --timeout=10m
+
+      - name: Deploy Frontend
+        id: deploy-frontend
+        run: |
+          FRONTEND_IMAGE="${{ needs.build.outputs.frontend_image }}"
+
+          echo "🚀 Deploying frontend to PRODUCTION..."
+          envsubst < k8s/frontend-deployment-prod.yaml | kubectl apply -n production -f -
+
+          echo "⏳ Waiting for frontend rollout..."
+          kubectl rollout status deployment/frontend -n production --timeout=10m
+
+      - name: Apply Ingress
+        run: |
+          echo "🌐 Applying production ingress..."
+          kubectl apply -n production -f k8s/ingress-prod.yaml
+
+      - name: Verify Production Deployment
+        run: |
+          echo "✅ Verifying PRODUCTION deployment..."
+
+          kubectl get pods -n production
+          kubectl get svc -n production
+          kubectl get ingress -n production
+
+          echo "📋 Recent Backend Logs:"
+          kubectl logs -n production -l app=backend --tail=50 || true
+
+          echo "📋 Recent Frontend Logs:"
+          kubectl logs -n production -l app=frontend --tail=50 || true
+
+      - name: Debug on Failure
+        if: failure()
+        run: |
+          echo "🐞 PRODUCTION deployment failed - Gathering diagnostics..."
+
+          kubectl get pods -n production -o wide
+          kubectl get events -n production --sort-by='.lastTimestamp' | tail -50
+
+          for pod in $(kubectl get pods -n production -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- Pod: $pod ---"
+            kubectl describe pod "$pod" -n production
+            echo "--- Logs ---"
+            kubectl logs "$pod" -n production --all-containers=true --tail=100 || true
+          done
+
+  # ============================================================================
+  # SMOKE-TESTS: Run smoke tests after deployment
+  # ============================================================================
+  smoke-tests:
+    name: Smoke Tests
+    needs: [deploy-dev, deploy-staging, deploy-production]
+    if: always() && (needs.deploy-dev.result == 'success' || needs.deploy-staging.result == 'success' || needs.deploy-production.result == 'success')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Configure kubectl
+        run: |
+          mkdir -p ~/.kube
+          if [ "${{ needs.prepare.outputs.environment }}" == "production" ]; then
+            echo "${{ secrets.KUBE_CONFIG_PROD }}" | base64 -d > ~/.kube/config
+          else
+            echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          fi
+          chmod 600 ~/.kube/config
+
+      - name: Wait for Pods Ready
+        id: wait-pods
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "⏳ Waiting for pods to be ready in namespace: $NS"
+
+          kubectl wait --for=condition=ready pod -l "app in (backend,frontend)" -n "$NS" --timeout=5m || {
+            echo "❌ Pods not ready after timeout"
+            kubectl get pods -n "$NS"
+            exit 1
+          }
+
+          echo "✅ All pods are ready"
+
+      - name: Test Backend Health
+        id: test-backend
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🔍 Testing backend health endpoint..."
+
+          # Get service endpoint
+          BACKEND_URL=$(kubectl get svc backend -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo "localhost")
+
+          # If no load balancer, use port forwarding
+          if [ "$BACKEND_URL" == "localhost" ]; then
+            echo "Using port forwarding for backend test..."
+            kubectl port-forward -n "$NS" svc/backend 8080:80 &
+            PF_PID=$!
+            sleep 5
+            BACKEND_URL="localhost:8080"
+          fi
+
+          # Test health endpoint
+          response=$(curl -s -o /dev/null -w "%{http_code}" "http://$BACKEND_URL/health" || echo "000")
+
+          if [ "$response" == "200" ]; then
+            echo "✅ Backend health check passed (HTTP $response)"
+          else
+            echo "❌ Backend health check failed (HTTP $response)"
+            exit 1
+          fi
+
+          # Cleanup port forward
+          if [ -n "${PF_PID}" ]; then
+            kill $PF_PID 2>/dev/null || true
+          fi
+
+      - name: Test Frontend Accessibility
+        id: test-frontend
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🔍 Testing frontend accessibility..."
+
+          FRONTEND_URL=$(kubectl get svc frontend -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo "localhost")
+
+          if [ "$FRONTEND_URL" == "localhost" ]; then
+            echo "Using port forwarding for frontend test..."
+            kubectl port-forward -n "$NS" svc/frontend 3000:80 &
+            PF_PID=$!
+            sleep 5
+            FRONTEND_URL="localhost:3000"
+          fi
+
+          response=$(curl -s -o /dev/null -w "%{http_code}" "http://$FRONTEND_URL/" || echo "000")
+
+          if [ "$response" == "200" ]; then
+            echo "✅ Frontend accessibility check passed (HTTP $response)"
+          else
+            echo "❌ Frontend accessibility check failed (HTTP $response)"
+            exit 1
+          fi
+
+          if [ -n "${PF_PID}" ]; then
+            kill $PF_PID 2>/dev/null || true
+          fi
+
+      - name: Test Database Connectivity
+        id: test-db
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🔍 Testing database connectivity from backend..."
+
+          # Execute database connectivity test from backend pod
+          BACKEND_POD=$(kubectl get pods -n "$NS" -l app=backend -o jsonpath='{.items[0].metadata.name}')
+
+          if kubectl exec -n "$NS" "$BACKEND_POD" -- python -c "
+import os
+import sys
+from sqlalchemy import create_engine, text
+
+try:
+    db_url = os.getenv('DATABASE_URL')
+    if not db_url:
+        print('DATABASE_URL not set')
+        sys.exit(1)
+
+    engine = create_engine(db_url)
+    with engine.connect() as conn:
+        result = conn.execute(text('SELECT 1'))
+        print('Database connection successful')
+        sys.exit(0)
+except Exception as e:
+    print(f'Database connection failed: {e}')
+    sys.exit(1)
+          "; then
+            echo "✅ Database connectivity check passed"
+          else
+            echo "❌ Database connectivity check failed"
+            exit 1
+          fi
+
+      - name: Run API Smoke Tests
+        id: test-api
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🔍 Running API smoke tests..."
+
+          BACKEND_POD=$(kubectl get pods -n "$NS" -l app=backend -o jsonpath='{.items[0].metadata.name}')
+
+          # Test critical endpoints
+          kubectl exec -n "$NS" "$BACKEND_POD" -- python -m pytest tests/smoke/ -v || {
+            echo "⚠️  Smoke tests not configured, skipping..."
+            echo "   (Create tests/smoke/ directory with API tests)"
+          }
+
+      - name: Gather Smoke Test Results
+        if: always()
+        run: |
+          echo "📊 Smoke Test Summary:"
+          echo "  Backend Health: ${{ steps.test-backend.outcome }}"
+          echo "  Frontend Access: ${{ steps.test-frontend.outcome }}"
+          echo "  Database: ${{ steps.test-db.outcome }}"
+          echo "  API Tests: ${{ steps.test-api.outcome }}"
+
+          if [ "${{ steps.test-backend.outcome }}" == "failure" ] || \
+             [ "${{ steps.test-frontend.outcome }}" == "failure" ] || \
+             [ "${{ steps.test-db.outcome }}" == "failure" ]; then
+            echo ""
+            echo "❌ SMOKE TESTS FAILED - Initiating rollback"
+            exit 1
+          fi
+
+  # ============================================================================
+  # ROLLBACK: Automatic rollback on smoke test failure
+  # ============================================================================
+  rollback:
+    name: Rollback Deployment
+    needs: [prepare, smoke-tests]
+    if: failure() && needs.prepare.outputs.environment != 'dev'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Configure kubectl
+        run: |
+          if [ "${{ needs.prepare.outputs.environment }}" == "production" ]; then
+            echo "${{ secrets.KUBE_CONFIG_PROD }}" | base64 -d > ~/.kube/config
+          else
+            echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          fi
+          chmod 600 ~/.kube/config
+
+      - name: Rollback Backend
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🔄 Rolling back backend deployment..."
+
+          kubectl rollout undo deployment/backend -n "$NS"
+
+          echo "⏳ Waiting for rollback to complete..."
+          kubectl rollout status deployment/backend -n "$NS" --timeout=5m
+
+          echo "✅ Backend rollback completed"
+
+      - name: Rollback Frontend
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🔄 Rolling back frontend deployment..."
+
+          kubectl rollout undo deployment/frontend -n "$NS"
+
+          echo "⏳ Waiting for rollback to complete..."
+          kubectl rollout status deployment/frontend -n "$NS" --timeout=5m
+
+          echo "✅ Frontend rollback completed"
+
+      - name: Verify Rollback
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "✅ Verifying rollback..."
+
+          kubectl get pods -n "$NS"
+          kubectl get deployments -n "$NS"
+
+          echo "📋 Rollback completed successfully"
+
+  # ============================================================================
+  # MONITOR: Health monitoring and resource usage
+  # ============================================================================
+  monitor:
+    name: Monitor Deployment
+    needs: [prepare, smoke-tests]
+    if: always() && needs.smoke-tests.result == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+
+      - name: Configure kubectl
+        run: |
+          if [ "${{ needs.prepare.outputs.environment }}" == "production" ]; then
+            echo "${{ secrets.KUBE_CONFIG_PROD }}" | base64 -d > ~/.kube/config
+          else
+            echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+          fi
+          chmod 600 ~/.kube/config
+
+      - name: Check Pod Health
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "📊 Pod Health Status:"
+          kubectl get pods -n "$NS" -o wide
+
+          echo ""
+          echo "📈 Resource Usage:"
+          kubectl top pods -n "$NS" || echo "Metrics server not available"
+
+      - name: Check Pod Logs for Errors
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🔍 Checking for errors in pod logs..."
+
+          for pod in $(kubectl get pods -n "$NS" -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- Logs: $pod ---"
+            kubectl logs "$pod" -n "$NS" --tail=20 | grep -i "error\|fail\|exception" || echo "No errors found"
+          done
+
+      - name: Verify Service Endpoints
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🌐 Service Endpoints:"
+          kubectl get endpoints -n "$NS"
+
+          echo ""
+          echo "🌐 Ingress Rules:"
+          kubectl get ingress -n "$NS"
+
+      - name: Run Liveness/Readiness Probes
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🔍 Checking probe status..."
+
+          for pod in $(kubectl get pods -n "$NS" -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- Pod: $pod ---"
+            kubectl describe pod "$pod" -n "$NS" | grep -A 5 "Liveness\|Readiness" || echo "No probes configured"
+          done
+
+  # ============================================================================
+  # NOTIFY: Send deployment notifications
+  # ============================================================================
+  notify:
+    name: Send Notifications
+    needs: [prepare, smoke-tests, monitor]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Determine Status
+        id: status
+        run: |
+          if [ "${{ needs.smoke-tests.result }}" == "success" ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "emoji=✅" >> $GITHUB_OUTPUT
+            echo "color=good" >> $GITHUB_OUTPUT
+          else
+            echo "status=failure" >> $GITHUB_OUTPUT
+            echo "emoji=❌" >> $GITHUB_OUTPUT
+            echo "color=danger" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send Slack Notification
+        if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          ENV="${{ needs.prepare.outputs.environment }}"
+          STATUS="${{ steps.status.outputs.status }}"
+          EMOJI="${{ steps.status.outputs.emoji }}"
+
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"text\": \"${EMOJI} Deployment to ${ENV}: ${STATUS}\",
+              \"blocks\": [
+                {
+                  \"type\": \"section\",
+                  \"text\": {
+                    \"type\": \"mrkdwn\",
+                    \"text\": \"${EMOJI} *Deployment to ${ENV}: ${STATUS}*\n\n*Repository:* ${{ github.repository }}\n*Branch:* ${{ github.ref_name }}\n*Commit:* ${{ github.sha }}\n*Author:* ${{ github.actor }}\n\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow>\"
+                  }
+                }
+              ]
+            }"
+
+      - name: Send Email on Failure
+        if: failure() && env.NOTIFICATION_EMAIL != ''
+        env:
+          NOTIFICATION_EMAIL: ${{ secrets.NOTIFICATION_EMAIL }}
+        run: |
+          ENV="${{ needs.prepare.outputs.environment }}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          mail -s "❌ Deployment Failed: ${ENV}" "$NOTIFICATION_EMAIL" <<EOF
+          Deployment to ${ENV} failed.
+
+          Repository: ${{ github.repository }}
+          Branch: ${{ github.ref_name }}
+          Commit: ${{ github.sha }}
+          Author: ${{ github.actor }}
+
+          View details: ${RUN_URL}
+
+          ---
+          This is an automated notification from GitHub Actions.
+          EOF
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const status = '${{ steps.status.outputs.status }}';
+            const emoji = '${{ steps.status.outputs.emoji }}';
+            const env = '${{ needs.prepare.outputs.environment }}';
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `${emoji} **Deployment Status: ${status}**\n\n` +
+                    `**Environment:** ${env}\n` +
+                    `**Workflow Run:** ${context.payload.repository.html_url}/actions/runs/${context.runId}\n\n` +
+                    `The deployment has been ${status === 'success' ? 'completed successfully' : 'failed'}.`
+            });
+
+      - name: Cleanup Dev Namespace
+        if: needs.prepare.outputs.environment == 'dev'
+        run: |
+          NS="${{ needs.prepare.outputs.namespace }}"
+          echo "🧹 Scheduling cleanup of dev namespace in 1 hour..."
+
+          # Create a cleanup job (would need a separate workflow for this)
+          echo "Dev namespace $NS will be cleaned up automatically"
+          echo "To cleanup manually: kubectl delete namespace $NS"

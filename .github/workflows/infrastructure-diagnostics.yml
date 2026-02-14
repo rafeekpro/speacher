@@ -1,0 +1,859 @@
+name: Infrastructure Diagnostics
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Kubernetes namespace to diagnose'
+        required: false
+        default: 'speecher'
+        type: choice
+        options:
+          - speecher
+          - github-runner
+          - all
+      verbose:
+        description: 'Enable verbose output'
+        required: false
+        default: true
+        type: boolean
+      upload_logs:
+        description: 'Upload diagnostic logs as artifacts'
+        required: false
+        default: true
+        type: boolean
+
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: '0 0 * * *'
+
+  push:
+    branches: [main, master]
+    paths:
+      - 'k8s/**'
+      - 'devops/**'
+      - '.github/workflows/infrastructure-diagnostics.yml'
+
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'k8s/**'
+      - 'devops/**'
+
+env:
+  KUBECONFIG: /tmp/kube-config
+  KUBECTL_VERSION: 'v1.28.0'
+
+jobs:
+  cluster-health:
+    name: Cluster Health Check
+    runs-on: ubuntu-latest
+    outputs:
+      cluster_healthy: ${{ steps.check-cluster.outputs.healthy }}
+      node_count: ${{ steps.check-nodes.outputs.count }}
+      control_plane_ready: ${{ steps.check-control-plane.outputs.ready }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Configure kubectl
+        run: |
+          echo "🔧 Configuring kubectl..."
+          mkdir -p $(dirname $KUBECONFIG)
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $KUBECONFIG
+          chmod 600 $KUBECONFIG
+          export KUBECONFIG=$KUBECONFIG
+
+      - name: Check cluster connectivity
+        id: check-cluster
+        run: |
+          echo "🔍 Checking cluster connectivity..."
+          if kubectl cluster-info >/dev/null 2>&1; then
+            echo "healthy=true" >> $GITHUB_OUTPUT
+            echo "✅ Cluster is reachable"
+            kubectl cluster-info
+          else
+            echo "healthy=false" >> $GITHUB_OUTPUT
+            echo "❌ Cannot reach cluster"
+            exit 1
+          fi
+
+      - name: Check node status
+        id: check-nodes
+        run: |
+          echo "🔍 Checking node status..."
+          echo "### Node Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get nodes -o wide >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          NODE_COUNT=$(kubectl get nodes --no-headers | wc -l)
+          echo "count=$NODE_COUNT" >> $GITHUB_OUTPUT
+
+          NOT_READY=$(kubectl get nodes --no-headers | grep -v " Ready " || echo "")
+          if [ -n "$NOT_READY" ]; then
+            echo "⚠️ Some nodes are not Ready:"
+            echo "$NOT_READY"
+          else
+            echo "✅ All $NODE_COUNT node(s) are Ready"
+          fi
+
+      - name: Check control plane health
+        id: check-control-plane
+        run: |
+          echo "🔍 Checking control plane components..."
+          echo "### Control Plane Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check core components
+          for component in etcd kube-scheduler kube-controller-manager kube-apiserver; do
+            status=$(kubectl get cs -o jsonpath="{.items[?(@.metadata.name=='$component')].status}" 2>/dev/null || echo "Unknown")
+            if [ "$status" = "True" ] || [ "$status" = "Healthy" ]; then
+              echo "✅ $component: $status" | tee -a $GITHUB_STEP_SUMMARY
+            else
+              echo "⚠️ $component: $status" | tee -a $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "ready=true" >> $GITHUB_OUTPUT
+
+      - name: Check cluster version and info
+        run: |
+          echo "🔍 Cluster version and information..."
+          echo "### Cluster Information" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl version -o yaml >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Check resource quotas
+        run: |
+          echo "🔍 Checking resource quotas..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+          if [ "$NAMESPACE" != "all" ]; then
+            echo "### Resource Quotas for $NAMESPACE" >> $GITHUB_STEP_SUMMARY
+            kubectl get resourcequota -n $NAMESPACE -o wide 2>/dev/null || echo "No quotas defined" | tee -a $GITHUB_STEP_SUMMARY
+          else
+            echo "### Resource Quotas (all namespaces)" >> $GITHUB_STEP_SUMMARY
+            kubectl get resourcequota --all-namespaces -o wide 2>/dev/null || echo "No quotas defined" | tee -a $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Debug on failure
+        if: failure()
+        run: |
+          echo "🐞 Cluster health check failed - gathering diagnostic info..."
+          echo "### Cluster Health Diagnostics" >> $GITHUB_STEP_SUMMARY
+          kubectl cluster-info --request-timeout=5s 2>&1 | tee -a $GITHUB_STEP_SUMMARY || true
+          kubectl get nodes -o yaml 2>&1 | tee -a cluster-debug.log || true
+          kubectl describe nodes 2>&1 | tee -a cluster-debug.log || true
+
+      - name: Upload debug logs
+        if: failure() && inputs.upload_logs == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cluster-health-debug-logs
+          path: cluster-debug.log
+          retention-days: 7
+
+  workload-diagnostics:
+    name: Workload Diagnostics
+    runs-on: ubuntu-latest
+    needs: cluster-health
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Configure kubectl
+        run: |
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $KUBECONFIG
+          chmod 600 $KUBECONFIG
+
+      - name: List all pods with status
+        id: list-pods
+        run: |
+          echo "🔍 Listing all pods..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### Pod Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$NAMESPACE" = "all" ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get pods --all-namespaces -o wide >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get pods -n $NAMESPACE -o wide >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Identify stuck/failing pods
+        id: failing-pods
+        run: |
+          echo "🔍 Checking for stuck or failing pods..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### Failing Pods" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$NAMESPACE" = "all" ]; then
+            FAILING=$(kubectl get pods --all-namespaces --field-selector=status.phase!=Running,status.phase!=Succeeded -o jsonpath='{.items[*].metadata.namespace}/{.items[*].metadata.name}')
+          else
+            FAILING=$(kubectl get pods -n $NAMESPACE --field-selector=status.phase!=Running,status.phase!=Succeeded -o jsonpath='{.items[*].metadata.name}')
+          fi
+
+          if [ -n "$FAILING" ]; then
+            echo "⚠️ Found failing pods:" | tee -a $GITHUB_STEP_SUMMARY
+            echo "$FAILING" | tee -a $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ No failing pods found" | tee -a $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check for ImagePullBackOff pods
+        run: |
+          echo "🔍 Checking for ImagePullBackOff..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          if [ "$NAMESPACE" = "all" ]; then
+            IMAGE_PULL_BACKOFF=$(kubectl get pods --all-namespaces -o jsonpath='{range .items[?(@.status.containerStatuses[*].state.waiting.reason=="ImagePullBackOff")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}')
+          else
+            IMAGE_PULL_BACKOFF=$(kubectl get pods -n $NAMESPACE -o jsonpath='{range .items[?(@.status.containerStatuses[*].state.waiting.reason=="ImagePullBackOff")]}{.metadata.name}{"\n"}{end}')
+          fi
+
+          if [ -n "$IMAGE_PULL_BACKOFF" ]; then
+            echo "⚠️ Pods with ImagePullBackOff:" | tee -a $GITHUB_STEP_SUMMARY
+            echo "$IMAGE_PULL_BACKOFF" | tee -a $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ No ImagePullBackOff pods" | tee -a $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check for CrashLoopBackOff pods
+        run: |
+          echo "🔍 Checking for CrashLoopBackOff..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          if [ "$NAMESPACE" = "all" ]; then
+            CRASH_LOOP=$(kubectl get pods --all-namespaces -o jsonpath='{range .items[?(@.status.containerStatuses[*].state.waiting.reason=="CrashLoopBackOff")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}')
+          else
+            CRASH_LOOP=$(kubectl get pods -n $NAMESPACE -o jsonpath='{range .items[?(@.status.containerStatuses[*].state.waiting.reason=="CrashLoopBackOff")]}{.metadata.name}{"\n"}{end}')
+          fi
+
+          if [ -n "$CRASH_LOOP" ]; then
+            echo "⚠️ Pods with CrashLoopBackOff:" | tee -a $GITHUB_STEP_SUMMARY
+            echo "$CRASH_LOOP" | tee -a $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ No CrashLoopBackOff pods" | tee -a $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check deployment status
+        run: |
+          echo "🔍 Checking deployment status..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### Deployment Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$NAMESPACE" = "all" ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get deployments --all-namespaces -o wide >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get deployments -n $NAMESPACE -o wide >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check statefulsets
+        run: |
+          echo "🔍 Checking StatefulSet status..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          if [ "$NAMESPACE" = "all" ]; then
+            kubectl get statefulsets --all-namespaces -o wide || echo "No StatefulSets found"
+          else
+            kubectl get statefulsets -n $NAMESPACE -o wide || echo "No StatefulSets found"
+          fi
+
+      - name: Check services and endpoints
+        run: |
+          echo "🔍 Checking services..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### Services and Endpoints" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$NAMESPACE" = "all" ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get services --all-namespaces -o wide >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Endpoint Readiness" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get endpoints --all-namespaces >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get services -n $NAMESPACE -o wide >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Endpoint Readiness" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get endpoints -n $NAMESPACE >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check ingress status
+        run: |
+          echo "🔍 Checking ingress..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### Ingress Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$NAMESPACE" = "all" ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get ingress --all-namespaces -o wide >> $GITHUB_STEP_SUMMARY 2>&1 || echo "No ingress resources found"
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get ingress -n $NAMESPACE -o wide >> $GITHUB_STEP_SUMMARY 2>&1 || echo "No ingress resources found"
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Get detailed pod info for failing pods
+        if: steps.failing-pods.outputs.count > 0
+        run: |
+          echo "🔍 Getting detailed pod info..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          mkdir -p pod-details
+          if [ "$NAMESPACE" = "all" ]; then
+            for ns in $(kubectl get namespaces -o jsonpath='{.items[*].metadata.name}'); do
+              kubectl describe pods -n $ns > pod-details/$ns.log 2>&1 || true
+              kubectl logs --all-containers=true -n $ns --prefix=true --tail=50 > pod-details/$ns-logs.log 2>&1 || true
+            done
+          else
+            kubectl describe pods -n $NAMESPACE > pod-details/pods.log 2>&1 || true
+            kubectl get pods -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}' | xargs -I{} kubectl logs --all-containers=true -n $NAMESPACE --prefix=true --tail=50 > pod-details/pods-logs.log 2>&1 || true
+          fi
+
+      - name: Upload pod diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workload-diagnostics
+          path: pod-details/
+          retention-days: 7
+
+  resource-analysis:
+    name: Resource Analysis
+    runs-on: ubuntu-latest
+    needs: cluster-health
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Configure kubectl
+        run: |
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $KUBECONFIG
+          chmod 600 $KUBECONFIG
+
+      - name: Check pod resource usage
+        id: resource-usage
+        run: |
+          echo "🔍 Checking resource usage..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### Resource Usage" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check if metrics server is available
+          if kubectl top pods --all-namespaces >/dev/null 2>&1; then
+            if [ "$NAMESPACE" = "all" ]; then
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              kubectl top pods --all-namespaces -A >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            else
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              kubectl top pods -n $NAMESPACE >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "⚠️ Metrics API not available - installing metrics-server..." | tee -a $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check node resource usage
+        run: |
+          echo "🔍 Checking node resource usage..."
+
+          if kubectl top nodes >/dev/null 2>&1; then
+            echo "### Node Resources" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl top nodes >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Metrics API not available for nodes" | tee -a $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Identify resource bottlenecks
+        run: |
+          echo "🔍 Analyzing resource bottlenecks..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### Resource Bottlenecks" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check for pods hitting resource limits
+          if kubectl top pods --all-namespaces >/dev/null 2>&1; then
+            echo "Pods using >80% of CPU limits:" >> $GITHUB_STEP_SUMMARY
+            kubectl top pods --all-namespaces -A | awk 'NR>1 && $3+0 > 80 {print $0}' >> $GITHUB_STEP_SUMMARY || echo "None" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            echo "Pods using >80% of Memory limits:" >> $GITHUB_STEP_SUMMARY
+            kubectl top pods --all-namespaces -A | awk 'NR>1 && $5+0 > 80 {print $0}' >> $GITHUB_STEP_SUMMARY || echo "None" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check persistent volume claims
+        run: |
+          echo "🔍 Checking PVCs..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### Persistent Volume Claims" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$NAMESPACE" = "all" ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get pvc --all-namespaces -o wide >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            kubectl get pvc -n $NAMESPACE -o wide >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check storage capacity
+        run: |
+          echo "🔍 Checking storage capacity..."
+          echo "### Storage Capacity" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          kubectl get pv >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          kubectl get storageclass >> $GITHUB_STEP_SUMMARY
+
+      - name: Check resource quotas and limits
+        run: |
+          echo "🔍 Checking resource quotas..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          if [ "$NAMESPACE" = "all" ]; then
+            kubectl get resourcequota --all-namespaces -o yaml > resource-quotas.yaml || true
+            kubectl get limitrange --all-namespaces -o yaml > limit-ranges.yaml || true
+          else
+            kubectl get resourcequota -n $NAMESPACE -o yaml > resource-quotas.yaml || true
+            kubectl get limitrange -n $NAMESPACE -o yaml > limit-ranges.yaml || true
+          fi
+
+      - name: Upload resource analysis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resource-analysis
+          path: |
+            resource-quotas.yaml
+            limit-ranges.yaml
+          retention-days: 7
+
+  network-connectivity:
+    name: Network Connectivity
+    runs-on: ubuntu-latest
+    needs: cluster-health
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Configure kubectl
+        run: |
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $KUBECONFIG
+          chmod 600 $KUBECONFIG
+
+      - name: Test DNS resolution
+        run: |
+          echo "🔍 Testing DNS resolution..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### DNS Resolution" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Create test pod
+          cat <<EOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: network-test
+            namespace: $NAMESPACE
+          spec:
+            containers:
+            - name: network-test
+              image: nicolaka/netshoot:latest
+              command: ["sleep", "3600"]
+          restartPolicy: Never
+          EOF
+
+          # Wait for pod to be ready
+          kubectl wait --for=condition=ready pod/network-test -n $NAMESPACE --timeout=60s
+
+          # Test internal DNS
+          echo "Testing kubernetes.default.svc..." >> $GITHUB_STEP_SUMMARY
+          kubectl exec network-test -n $NAMESPACE -- nslookup kubernetes.default.svc >> $GITHUB_STEP_SUMMARY 2>&1 || echo "❌ DNS lookup failed" >> $GITHUB_STEP_SUMMARY
+
+          # Test service DNS
+          BACKEND_SVC=$(kubectl get svc -n $NAMESPACE -o jsonpath='{.items[?(@.metadata.name=="backend")].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$BACKEND_SVC" ]; then
+            echo "Testing $BACKEND_SVC.$NAMESPACE.svc.cluster.local..." >> $GITHUB_STEP_SUMMARY
+            kubectl exec network-test -n $NAMESPACE -- nslookup $BACKEND_SVC.$NAMESPACE.svc.cluster.local >> $GITHUB_STEP_SUMMARY 2>&1 || echo "⚠️ Service DNS lookup failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Test service-to-service communication
+        run: |
+          echo "🔍 Testing service connectivity..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### Service Connectivity" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Test backend service
+          BACKEND_SVC=$(kubectl get svc -n $NAMESPACE -o jsonpath='{.items[?(@.metadata.name=="backend")].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$BACKEND_SVC" ]; then
+            BACKEND_PORT=$(kubectl get svc $BACKEND_SVC -n $NAMESPACE -o jsonpath='{.spec.ports[0].port}')
+            echo "Testing connectivity to $BACKEND_SVC:$BACKEND_PORT..." >> $GITHUB_STEP_SUMMARY
+            kubectl exec network-test -n $NAMESPACE -- nc -zv $BACKEND_SVC $BACKEND_PORT >> $GITHUB_STEP_SUMMARY 2>&1 || echo "❌ Service connectivity failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Test frontend service
+          FRONTEND_SVC=$(kubectl get svc -n $NAMESPACE -o jsonpath='{.items[?(@.metadata.name=="frontend")].metadata.name}' 2>/dev/null || echo "")
+          if [ -n "$FRONTEND_SVC" ]; then
+            FRONTEND_PORT=$(kubectl get svc $FRONTEND_SVC -n $NAMESPACE -o jsonpath='{.spec.ports[0].port}')
+            echo "Testing connectivity to $FRONTEND_SVC:$FRONTEND_PORT..." >> $GITHUB_STEP_SUMMARY
+            kubectl exec network-test -n $NAMESPACE -- nc -zv $FRONTEND_SVC $FRONTEND_PORT >> $GITHUB_STEP_SUMMARY 2>&1 || echo "❌ Service connectivity failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Test external connectivity
+        run: |
+          echo "🔍 Testing external connectivity..."
+
+          echo "### External Connectivity" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Test external DNS
+          echo "Testing external DNS (google.com)..." >> $GITHUB_STEP_SUMMARY
+          kubectl exec network-test -n speecher -- nslookup google.com >> $GITHUB_STEP_SUMMARY 2>&1 || echo "❌ External DNS failed" >> $GITHUB_STEP_SUMMARY
+
+          # Test HTTP connectivity
+          echo "Testing HTTP connectivity (google.com)..." >> $GITHUB_STEP_SUMMARY
+          kubectl exec network-test -n speecher -- curl -s -o /dev/null -w "%{http_code}" https://google.com >> $GITHUB_STEP_SUMMARY 2>&1 || echo "❌ HTTP connectivity failed" >> $GITHUB_STEP_SUMMARY
+
+      - name: Check network policies
+        run: |
+          echo "🔍 Checking network policies..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### Network Policies" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$NAMESPACE" = "all" ]; then
+            POLICIES=$(kubectl get networkpolicies --all-namespaces -o jsonpath='{.items}' | jq '. | length')
+            if [ "$POLICIES" -gt 0 ]; then
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              kubectl get networkpolicies --all-namespaces -o wide >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            else
+              echo "No network policies defined" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            kubectl get networkpolicies -n $NAMESPACE -o wide >> $GITHUB_STEP_SUMMARY 2>&1 || echo "No network policies" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Cleanup test pod
+        if: always()
+        run: |
+          kubectl delete pod network-test -n speecher --ignore-not-found=true --wait=false
+
+      - name: Debug network on failure
+        if: failure()
+        run: |
+          echo "🐞 Network diagnostics failed - gathering info..."
+          kubectl get pods -n speecher -o wide > network-debug.log
+          kubectl get svc -n speecher -o yaml >> network-debug.log
+          kubectl get endpoints -n speecher -o yaml >> network-debug.log
+          kubectl describe pod network-test -n speecher >> network-debug.log 2>&1 || true
+
+      - name: Upload network debug logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-debug-logs
+          path: network-debug.log
+          retention-days: 7
+
+  application-checks:
+    name: Application-Specific Checks
+    runs-on: ubuntu-latest
+    needs: [cluster-health, workload-diagnostics]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Configure kubectl
+        run: |
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $KUBECONFIG
+          chmod 600 $KUBECONFIG
+
+      - name: Check WireGuard peers (if applicable)
+        id: wireguard-check
+        run: |
+          echo "🔍 Checking WireGuard status..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          # Check if WireGuard pods exist
+          WG_PODS=$(kubectl get pods -n $NAMESPACE -l app=wireguard -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+
+          if [ -n "$WG_PODS" ]; then
+            echo "### WireGuard Status" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            for pod in $WG_PODS; do
+              echo "WireGuard pod: $pod" >> $GITHUB_STEP_SUMMARY
+              kubectl exec $pod -n $NAMESPACE -- wg show 2>&1 | tee -a $GITHUB_STEP_SUMMARY || echo "⚠️ Could not get WireGuard status" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "ℹ️ No WireGuard pods found" | tee -a $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check backend health endpoint
+        run: |
+          echo "🔍 Checking backend health..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### Backend Health" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Get backend service endpoint
+          BACKEND_POD=$(kubectl get pods -n $NAMESPACE -l app=speecher-backend -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+          if [ -n "$BACKEND_POD" ]; then
+            echo "Checking health endpoint on $BACKEND_POD..." >> $GITHUB_STEP_SUMMARY
+            kubectl exec $BACKEND_POD -n $NAMESPACE -- wget -q -O- http://localhost:8000/health 2>&1 | tee -a $GITHUB_STEP_SUMMARY || echo "❌ Backend health check failed" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ No backend pods found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check database connectivity
+        run: |
+          echo "🔍 Checking database connectivity..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          echo "### Database Connectivity" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check for PostgreSQL pods
+          DB_PODS=$(kubectl get pods -n $NAMESPACE -l app=postgres -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+
+          if [ -n "$DB_PODS" ]; then
+            for pod in $DB_PODS; do
+              echo "Testing database connection to $pod..." >> $GITHUB_STEP_SUMMARY
+              kubectl exec $pod -n $NAMESPACE -- pg_isready -U speecher_user 2>&1 | tee -a $GITHUB_STEP_SUMMARY || echo "⚠️ Database not ready" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "ℹ️ No database pods found in namespace" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check Redis connectivity (if applicable)
+        run: |
+          echo "🔍 Checking Redis connectivity..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          REDIS_PODS=$(kubectl get pods -n $NAMESPACE -l app=redis -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+
+          if [ -n "$REDIS_PODS" ]; then
+            echo "### Redis Status" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            for pod in $REDIS_PODS; do
+              echo "Redis pod: $pod" >> $GITHUB_STEP_SUMMARY
+              kubectl exec $pod -n $NAMESPACE -- redis-cli ping 2>&1 | tee -a $GITHUB_STEP_SUMMARY || echo "⚠️ Redis not responding" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+      - name: Check logs for errors
+        run: |
+          echo "🔍 Checking recent logs for errors..."
+          NAMESPACE="${{ inputs.namespace || 'speecher' }}"
+
+          mkdir -p logs
+          # Get recent logs from all pods
+          for pod in $(kubectl get pods -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}'); do
+            kubectl logs $pod -n $NAMESPACE --since=10m --tail=50 > logs/$pod.log 2>&1 || true
+
+            # Check for errors
+            ERROR_COUNT=$(grep -i "error\|exception\|failed" logs/$pod.log | wc -l)
+            if [ $ERROR_COUNT -gt 0 ]; then
+              echo "⚠️ Found $ERROR_COUNT error(s) in $pod" | tee -a $GITHUB_STEP_SUMMARY
+              echo "Last 5 errors:" >> $GITHUB_STEP_SUMMARY
+              grep -i "error\|exception\|failed" logs/$pod.log | tail -5 >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+      - name: Upload application logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-logs
+          path: logs/
+          retention-days: 7
+
+  generate-report:
+    name: Generate Diagnostic Report
+    runs-on: ubuntu-latest
+    needs: [cluster-health, workload-diagnostics, resource-analysis, network-connectivity, application-checks]
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate markdown summary
+        run: |
+          echo "# Infrastructure Diagnostics Report" > diagnostics-report.md
+          echo "" >> diagnostics-report.md
+          echo "**Generated:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> diagnostics-report.md
+          echo "**Triggered by:** ${{ github.event_name }}" >> diagnostics-report.md
+          echo "**Workflow Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> diagnostics-report.md
+          echo "" >> diagnostics-report.md
+
+          echo "## Executive Summary" >> diagnostics-report.md
+          echo "" >> diagnostics-report.md
+
+          # Cluster health status
+          if [ "${{ needs.cluster-health.outputs.cluster_healthy }}" = "true" ]; then
+            echo "- ✅ **Cluster Health:** Healthy" >> diagnostics-report.md
+          else
+            echo "- ❌ **Cluster Health:** Issues detected" >> diagnostics-report.md
+          fi
+
+          # Node count
+          echo "- 📊 **Nodes:** ${{ needs.cluster-health.outputs.node_count }}" >> diagnostics-report.md
+
+          echo "" >> diagnostics-report.md
+
+          echo "## Quick Links" >> diagnostics-report.md
+          echo "" >> diagnostics-report.md
+          echo "- [Cluster Health Job](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> diagnostics-report.md
+          echo "- [Workload Diagnostics](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> diagnostics-report.md
+          echo "- [Resource Analysis](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> diagnostics-report.md
+          echo "- [Network Connectivity](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> diagnostics-report.md
+          echo "- [Application Checks](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> diagnostics-report.md
+          echo "" >> diagnostics-report.md
+
+          echo "## Action Items" >> diagnostics-report.md
+          echo "" >> diagnostics-report.md
+
+          # Check for any failures
+          if [ "${{ needs.workload-diagnostics.result }}" != "success" ]; then
+            echo "### 🔴 Workload Issues" >> diagnostics-report.md
+            echo "Review the workload diagnostics job for details on failing pods." >> diagnostics-report.md
+            echo "" >> diagnostics-report.md
+          fi
+
+          if [ "${{ needs.network-connectivity.result }}" != "success" ]; then
+            echo "### 🔴 Network Issues" >> diagnostics-report.md
+            echo "Review the network connectivity job for DNS or service connectivity issues." >> diagnostics-report.md
+            echo "" >> diagnostics-report.md
+          fi
+
+          if [ "${{ needs.application-checks.result }}" != "success" ]; then
+            echo "### 🔴 Application Issues" >> diagnostics-report.md
+            echo "Review the application checks job for backend, database, or service health issues." >> diagnostics-report.md
+            echo "" >> diagnostics-report.md
+          fi
+
+          echo "## Recommendations" >> diagnostics-report.md
+          echo "" >> diagnostics-report.md
+          echo "1. Review all job summaries for detailed diagnostics" >> diagnostics-report.md
+          echo "2. Download artifacts for detailed logs and configurations" >> diagnostics-report.md
+          echo "3. Address any critical issues highlighted in this report" >> diagnostics-report.md
+          echo "4. Re-run diagnostics after fixes to verify resolution" >> diagnostics-report.md
+          echo "" >> diagnostics-report.md
+
+          echo "---" >> diagnostics-report.md
+          echo "*Report generated by Infrastructure Diagnostics Pipeline*" >> diagnostics-report.md
+
+          cat diagnostics-report.md
+
+      - name: Upload diagnostic report
+        uses: actions/upload-artifact@v4
+        with:
+          name: infrastructure-diagnostics-report
+          path: diagnostics-report.md
+          retention-days: 30
+
+      - name: Comment on PR (if applicable)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('diagnostics-report.md', 'utf8');
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: report
+            });
+
+      - name: Report summary
+        run: |
+          echo "### 📊 Diagnostic Report Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Full report available in artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ needs.cluster-health.outputs.cluster_healthy }}" = "true" ]; then
+            echo "✅ Cluster is healthy" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Cluster has issues - review details" >> $GITHUB_STEP_SUMMARY
+          fi

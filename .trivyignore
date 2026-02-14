@@ -1,0 +1,48 @@
+# Trivy Ignore File
+# Documentation: https://aquasecurity.github.io/trivy/latest/vulnerability/examples/ignore/
+
+# Format: vulnerability-id | artifact-name | (vulnerability-id && artifact-name)
+
+# ========================================
+# Python Dependencies
+# ========================================
+# CVE-2023-1234 in cryptography < 41.0.0 (acceptable until upgrade)
+# CVE-2023-XXXXX in flask (mitigated by app-level checks)
+
+# ========================================
+# Node.js Dependencies
+# ========================================
+# CVE-2023-XXXXX in lodash (acceptable - no user input)
+# CVE-2023-XXXXX in webpack-dev-tools (dev dependency only)
+
+# ========================================
+# Base Image Issues
+# ========================================
+# Alpine Linux CVEs (acceptable for development)
+# CVE-2023-XXXXX in openssl (mitigated by TLS termination)
+
+# ========================================
+# False Positives
+# ========================================
+# Known vulnerabilities that don't affect our usage
+
+# ========================================
+# Acceptable Risk
+# ========================================
+# The following are documented acceptable risks with mitigation strategies
+# To add new entries:
+# 1. Research the vulnerability
+# 2. Document mitigation strategy
+# 3. Add CVE ID
+# 4. Create ticket for future resolution
+
+# Example format:
+# CVE-2023-1234  # Mitigated by input validation, ticket #1234 for upgrade
+
+# ========================================
+# Important Notes
+# ========================================
+# - Each ignored CVE should have a corresponding ticket
+# - Review quarterly and remove when dependencies updated
+# - Document WHY it's acceptable (mitigation, dev-only, etc.)
+# - Never ignore CRITICAL vulnerabilities without approval

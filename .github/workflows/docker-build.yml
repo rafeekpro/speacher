@@ -1,0 +1,384 @@
+name: Docker Build Pipeline
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'Dockerfile*'
+      - 'docker-compose*.yml'
+      - '.github/workflows/docker-build.yml'
+  pull_request:
+    paths:
+      - 'Dockerfile*'
+      - 'docker-compose*.yml'
+  workflow_dispatch:
+    inputs:
+      build-dev:
+        description: 'Build development image'
+        required: false
+        type: boolean
+        default: true
+      scan-only:
+        description: 'Only scan existing images'
+        required: false
+        type: boolean
+        default: false
+  release:
+    types: [created]
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  security-events: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  KUBECONFIG: /tmp/kubeconfig
+  K8S_NAMESPACE: ci-${{ github.run_id }}
+  RETENTION_COUNT: 10
+
+jobs:
+  prepare:
+    name: Prepare Build Metadata
+    runs-on: ubuntu-latest
+    outputs:
+      metadata: ${{ steps.meta.outputs.metadata }}
+      tags: ${{ steps.meta.outputs.tags }}
+      platforms: ${{ steps.platforms.outputs.platforms }}
+      build_dev: ${{ steps.check-dev.outputs.exists }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for Dockerfile.dev
+        id: check-dev
+        run: |
+          if [ -f "Dockerfile.dev" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Determine build platforms
+        id: platforms
+        run: |
+          if [ "${{ github.event_name }}" == "release" ]; then
+            echo "platforms=linux/amd64,linux/arm64" >> $GITHUB_OUTPUT
+          else
+            echo "platforms=linux/amd64" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Configure kubectl
+        run: |
+          echo "${{ secrets.KUBECONFIG }}" > ${{ env.KUBECONFIG }}
+          chmod 600 ${{ env.KUBECONFIG }}
+          export KUBECONFIG=${{ env.KUBECONFIG }}
+
+  build-production:
+    name: Build Production Image
+    needs: prepare
+    if: ${{ !inputs.scan-only }}
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.build.outputs.tags }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          echo "${{ secrets.KUBECONFIG }}" > ${{ env.KUBECONFIG }}
+          chmod 600 ${{ env.KUBECONFIG }}
+
+      - name: Create unique namespace
+        run: |
+          kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Cleanup previous job
+        run: |
+          kubectl delete job kaniko-build-prod --namespace ${{ env.K8S_NAMESPACE }} --ignore-not-found=true
+          kubectl wait --for=delete job/kaniko-build-prod --namespace ${{ env.K8S_NAMESPACE }} --timeout=30s 2>/dev/null || true
+
+      - name: Create Kaniko job
+        id: build
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: kaniko-build-prod
+            namespace: ${{ env.K8S_NAMESPACE }}
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                initContainers:
+                - name: prepare-context
+                  image: alpine/git:latest
+                  command:
+                    - sh
+                    - -c
+                  - |
+                    git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git /workspace
+                    cd /workspace && git checkout ${{ github.sha }}
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                containers:
+                - name: kaniko
+                  image: gcr.io/kaniko-project/executor:latest
+                  args:
+                    - --dockerfile=/workspace/Dockerfile
+                    - --context=dir:///workspace
+                    - --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+                    - --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+                    - --cache=true
+                    - --cache-repo=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache
+                    - --cache-ttl=24h
+                    - --snapshotMode=redo
+                    - --use-new-run
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                    - name: docker-config
+                      mountPath: /kaniko/.docker
+                  env:
+                    - name: GOOGLE_APPLICATION_CREDENTIALS
+                      value: /kaniko/.docker/config.json
+                volumes:
+                - name: workspace
+                  emptyDir: {}
+                - name: docker-config
+                  secret:
+                    secretName: docker-reg-secret
+          EOF
+
+      - name: Wait for build completion
+        id: wait-build
+        run: |
+          kubectl wait --for=condition=complete job/kaniko-build-prod --namespace ${{ env.K8S_NAMESPACE }} --timeout=30m
+
+      - name: Get build logs
+        if: always()
+        run: |
+          kubectl logs job/kaniko-build-prod --namespace ${{ env.K8S_NAMESPACE }} --container=kaniko
+
+      - name: Extract build metadata
+        if: success()
+        run: |
+          POD=$(kubectl get pods --namespace ${{ env.K8S_NAMESPACE }} --selector=job-name=kaniko-build-prod -o jsonpath='{.items[0].metadata.name}')
+          kubectl logs $POD --namespace ${{ env.K8S_NAMESPACE }} --container=kaniko | grep -E "INFO.*Built image|digest" | tail -1 > /tmp/build-info.txt
+          cat /tmp/build-info.txt
+
+      - name: Cleanup namespace
+        if: always()
+        run: |
+          kubectl delete namespace ${{ env.K8S_NAMESPACE }} --ignore-not-found=true
+
+  build-development:
+    name: Build Development Image
+    needs: prepare
+    if: ${{ needs.prepare.outputs.build_dev == 'true' && (inputs.build-dev || inputs.build-dev == '') && !inputs.scan-only }}
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.build.outputs.tags }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        run: |
+          echo "${{ secrets.KUBECONFIG }}" > ${{ env.KUBECONFIG }}
+          chmod 600 ${{ env.KUBECONFIG }}
+
+      - name: Create unique namespace
+        run: |
+          kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Cleanup previous job
+        run: |
+          kubectl delete job kaniko-build-dev --namespace ${{ env.K8S_NAMESPACE }} --ignore-not-found=true
+          kubectl wait --for=delete job/kaniko-build-dev --namespace ${{ env.K8S_NAMESPACE }} --timeout=30s 2>/dev/null || true
+
+      - name: Create Kaniko job
+        id: build
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: kaniko-build-dev
+            namespace: ${{ env.K8S_NAMESPACE }}
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                initContainers:
+                - name: prepare-context
+                  image: alpine/git:latest
+                  command:
+                    - sh
+                    - -c
+                  - |
+                    git clone --depth 1 --branch ${{ github.ref_name }} https://github.com/${{ github.repository }}.git /workspace
+                    cd /workspace && git checkout ${{ github.sha }}
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                containers:
+                - name: kaniko
+                  image: gcr.io/kaniko-project/executor:latest
+                  args:
+                    - --dockerfile=/workspace/Dockerfile.dev
+                    - --context=dir:///workspace
+                    - --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${{ github.sha }}
+                    - --destination=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:dev-${{ github.ref_name }}
+                    - --cache=true
+                    - --cache-repo=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-cache
+                    - --cache-ttl=24h
+                    - --snapshotMode=redo
+                    - --use-new-run
+                  volumeMounts:
+                    - name: workspace
+                      mountPath: /workspace
+                    - name: docker-config
+                      mountPath: /kaniko/.docker
+                  env:
+                    - name: GOOGLE_APPLICATION_CREDENTIALS
+                      value: /kaniko/.docker/config.json
+                volumes:
+                - name: workspace
+                  emptyDir: {}
+                - name: docker-config
+                  secret:
+                    secretName: docker-reg-secret
+          EOF
+
+      - name: Wait for build completion
+        run: |
+          kubectl wait --for=condition=complete job/kaniko-build-dev --namespace ${{ env.K8S_NAMESPACE }} --timeout=30m
+
+      - name: Get build logs
+        if: always()
+        run: |
+          kubectl logs job/kaniko-build-dev --namespace ${{ env.K8S_NAMESPACE }} --container=kaniko
+
+      - name: Cleanup namespace
+        if: always()
+        run: |
+          kubectl delete namespace ${{ env.K8S_NAMESPACE }} --ignore-not-found=true
+
+  security-scan:
+    name: Security Scanning
+    needs: [build-production, build-development]
+    runs-on: ubuntu-latest
+    outputs:
+      critical: ${{ steps.scan.outputs.critical }}
+      high: ${{ steps.scan.outputs.high }}
+      medium: ${{ steps.scan.outputs.medium }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        id: scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '1'
+        env:
+          TRIVY_EXIT_CODE: '1'
+          TRIVY_SEVERITY: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = `${{ steps.scan.outputs.summary }}`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🔒 Security Scan Results\n\n${summary}`
+            });
+
+  cleanup:
+    name: Cleanup Old Images
+    needs: [build-production, build-development, security-scan]
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure kubectl
+        run: |
+          echo "${{ secrets.KUBECONFIG }}" > ${{ env.KUBECONFIG }}
+          chmod 600 ${{ env.KUBECONFIG }}
+
+      - name: List all images
+        id: list
+        run: |
+          echo "IMAGE_TAGS=$(gh api /repos/${{ github.repository }}/packages?package_type=container \
+            --jq '.[].name' | grep -E '${{ env.IMAGE_NAME }}' | wc -l)" >> $GITHUB_OUTPUT
+
+      - name: Delete old images
+        if: steps.list.outputs.IMAGE_TAGS > ${{ env.RETENTION_COUNT }}
+        run: |
+          TAGS_TO_DELETE=$((${{ steps.list.outputs.IMAGE_TAGS }} - ${{ env.RETENTION_COUNT }}))
+
+          echo "Deleting $TAGS_TO_DELETE old image tags..."
+
+          gh api \
+            --method GET \
+            /repos/${{ github.repository }}/packages/container/${{ env.IMAGE_NAME }}/versions \
+            --jq '.[:'${TAGS_TO_DELETE}'][].id' | \
+            xargs -I {} gh api --method DELETE /repos/${{ github.repository }}/packages/container/${{ env.IMAGE_NAME }}/versions/{}
+
+      - name: Summary
+        run: |
+          echo "✅ Docker Build Pipeline Complete"
+          echo ""
+          echo "📦 Built Images:"
+          if [ "${{ needs.build-production.outputs.digest }}" != "" ]; then
+            echo "  - Production: ${{ needs.build-production.outputs.digest }}"
+          fi
+          if [ "${{ needs.build-development.outputs.digest }}" != "" ]; then
+            echo "  - Development: ${{ needs.build-development.outputs.digest }}"
+          fi
+          echo ""
+          echo "🔒 Security Scan:"
+          echo "  - Critical: ${{ needs.security-scan.outputs.critical || '0' }}"
+          echo "  - High: ${{ needs.security-scan.outputs.high || '0' }}"
+          echo "  - Medium: ${{ needs.security-scan.outputs.medium || '0' }}"
