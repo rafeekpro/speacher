@@ -88,9 +88,10 @@ jobs:
 
       - name: Configure kubectl
         run: |
-          echo "${{ secrets.KUBECONFIG }}" > ${{ env.KUBECONFIG }}
-          chmod 600 ${{ env.KUBECONFIG }}
-          export KUBECONFIG=${{ env.KUBECONFIG }}
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > /tmp/kubeconfig
+          chmod 600 /tmp/kubeconfig
+          export KUBECONFIG=/tmp/kubeconfig
+          kubectl cluster-info
 
   build-production:
     name: Build Production Image
@@ -106,8 +107,10 @@ jobs:
 
       - name: Configure kubectl
         run: |
-          echo "${{ secrets.KUBECONFIG }}" > ${{ env.KUBECONFIG }}
-          chmod 600 ${{ env.KUBECONFIG }}
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > /tmp/kubeconfig
+          chmod 600 /tmp/kubeconfig
+          export KUBECONFIG=/tmp/kubeconfig
+          kubectl cluster-info
 
       - name: Create unique namespace
         run: |
@@ -209,8 +212,10 @@ jobs:
 
       - name: Configure kubectl
         run: |
-          echo "${{ secrets.KUBECONFIG }}" > ${{ env.KUBECONFIG }}
-          chmod 600 ${{ env.KUBECONFIG }}
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > /tmp/kubeconfig
+          chmod 600 /tmp/kubeconfig
+          export KUBECONFIG=/tmp/kubeconfig
+          kubectl cluster-info
 
       - name: Create unique namespace
         run: |
@@ -344,8 +349,10 @@ jobs:
     steps:
       - name: Configure kubectl
         run: |
-          echo "${{ secrets.KUBECONFIG }}" > ${{ env.KUBECONFIG }}
-          chmod 600 ${{ env.KUBECONFIG }}
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > /tmp/kubeconfig
+          chmod 600 /tmp/kubeconfig
+          export KUBECONFIG=/tmp/kubeconfig
+          kubectl cluster-info
 
       - name: List all images
         id: list
@@ -354,7 +361,7 @@ jobs:
             --jq '.[].name' | grep -E '${{ env.IMAGE_NAME }}' | wc -l)" >> $GITHUB_OUTPUT
 
       - name: Delete old images
-        if: steps.list.outputs.IMAGE_TAGS > ${{ env.RETENTION_COUNT }}
+        if: ${{ steps.list.outputs.IMAGE_TAGS > env.RETENTION_COUNT }}
         run: |
           TAGS_TO_DELETE=$((${{ steps.list.outputs.IMAGE_TAGS }} - ${{ env.RETENTION_COUNT }}))
 

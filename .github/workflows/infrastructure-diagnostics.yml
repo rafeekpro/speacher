@@ -68,6 +68,7 @@ jobs:
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $KUBECONFIG
           chmod 600 $KUBECONFIG
           export KUBECONFIG=$KUBECONFIG
+          kubectl cluster-info
 
       - name: Check cluster connectivity
         id: check-cluster
@@ -178,6 +179,8 @@ jobs:
         run: |
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $KUBECONFIG
           chmod 600 $KUBECONFIG
+          export KUBECONFIG=$KUBECONFIG
+          kubectl cluster-info
 
       - name: List all pods with status
         id: list-pods
@@ -373,6 +376,8 @@ jobs:
         run: |
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $KUBECONFIG
           chmod 600 $KUBECONFIG
+          export KUBECONFIG=$KUBECONFIG
+          kubectl cluster-info
 
       - name: Check pod resource usage
         id: resource-usage
@@ -499,6 +504,8 @@ jobs:
         run: |
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $KUBECONFIG
           chmod 600 $KUBECONFIG
+          export KUBECONFIG=$KUBECONFIG
+          kubectl cluster-info
 
       - name: Test DNS resolution
         run: |
@@ -636,6 +643,8 @@ jobs:
         run: |
           echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $KUBECONFIG
           chmod 600 $KUBECONFIG
+          export KUBECONFIG=$KUBECONFIG
+          kubectl cluster-info
 
       - name: Check WireGuard peers (if applicable)
         id: wireguard-check
